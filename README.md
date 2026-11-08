@@ -91,8 +91,11 @@ tools/simulate_device.py
 
 First version. It **compiles and builds a debug APK**. The server side of the
 protocol has been exercised end to end with `simulate_device.py` (enrol, single
-and batched posts, burned code rejected, positions stored and shown). See the
-notes below for what has and hasn't been run on an emulator/device.
+and batched posts, burned code rejected, positions stored and shown). **Verified on an Android 15 emulator** against a live server: enrolment, reporting
+(foreground service, ±5 m fixes reaching the server and the live map), offline
+queueing and flush on reconnect (2 queued -> 0, server count rose), and
+revocation (app returns to onboarding, service stops). **Not yet tried on a
+physical phone**, and QR scanning is untested (it needs a camera).
 
 Not done yet: auto-start after reboot, background-location permission flow
 (not needed while the service is started from the foreground), battery
