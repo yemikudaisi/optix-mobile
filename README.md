@@ -18,14 +18,46 @@ eTracker server repo (summarised below).
 * **Offline-safe** — every fix is written to a local SQLite queue first and only
   deleted once the server accepts it. Dead zones, crashes and reboots lose
   nothing; the queue flushes in batches of 200 with exponential backoff.
+* **Situation tab** — a read-only common operating picture for the device's
+  operation: the plan (phases switchable), other units' live positions drawn as
+  military symbols, positioned watch-log entries, your own position ("YOU"), an
+  MGRS grid and centre-of-map coordinates. Refreshes every ~10 s while open and
+  keeps the last picture for offline use. What a device may see is set per device
+  on the Devices page (*Own operation* / *None*; the threat/IPB layer is a
+  separate, off-by-default tick).
 * **Revocation** — if the server rejects the token (operator revoked the
   device) reporting stops and the app returns to onboarding.
 * **Secure storage** — the device token lives in `EncryptedSharedPreferences`;
   the server stores only a hash. Release builds are HTTPS-only.
 
+### How the Situation tab works
+
+The map is the *same* page the web app uses (Leaflet + the shared military-symbol
+renderer), built from the server repo and bundled in `app/src/main/assets/situation/`,
+so symbols and graphics look identical on the phone. It runs in a `WebView`; native
+code owns auth and networking and pushes data in through a tiny JS API
+(`Situation.setData / setSelf / setStatus / upsertDevice / removeDevice / addWatch`).
+
+After changing the web map (`frontend/src/situation/` in the server repo), refresh
+the bundle:
+
+```
+tools/sync-situation.sh [path/to/etracker-server-repo]   # builds it and copies it into the app
+```
+
+The bundled assets are generated (git-ignored): run that script once on a fresh
+checkout before building. Tiles come from OpenStreetMap, so the map needs a
+connection (the WebView caches what it has seen).
+
+Phones **poll** rather than use sockets: Frappe's socket server only accepts a
+browser session or an API key, not a device token, and broadcasts site-wide. The
+JS API already takes single updates, so a push channel can be added without
+touching the map.
+
 ## Build
 
-JDK 17 + Android SDK 35 (or Android Studio Ladybug or newer). The Gradle wrapper
+JDK 17 + Android SDK 35 (or Android Studio Ladybug or newer). First run
+`tools/sync-situation.sh` (see above) to bundle the Situation map. The Gradle wrapper
 is included; point it at your SDK with `local.properties` (`sdk.dir=/path/to/sdk`,
 git-ignored) or `ANDROID_HOME`.
 
@@ -81,10 +113,12 @@ keep the queue and retry.
 ```
 app/src/main/java/app/etracker/tracker/
   MainActivity.kt
-  data/     Session (encrypted token), Api (HTTP), FixQueue (SQLite), TrackerState
+  data/     Session (encrypted token), Api (HTTP), FixQueue (SQLite),
+            SituationCache (last picture), TrackerState
   service/  TrackingService (foreground GPS + delivery)
-  ui/       TrackerApp (onboarding + status), Theme
-tools/simulate_device.py
+  ui/       TrackerApp (tabs, onboarding, status), SituationScreen (WebView), Theme
+app/src/main/assets/situation/   bundled map page (generated)
+tools/    simulate_device.py, sync-situation.sh, emulator.sh, env.sh
 ```
 
 ## Status
@@ -97,7 +131,10 @@ queueing and flush on reconnect (2 queued -> 0, server count rose), and
 revocation (app returns to onboarding, service stops). **Not yet tried on a
 physical phone**, and QR scanning is untested (it needs a camera).
 
-Not done yet: auto-start after reboot, background-location permission flow
+Situation tab verified on the emulator: map and plan render, own position shown,
+offline banner with saved data. **Not yet tried on a physical phone.**
+
+Not done yet: push updates (sockets), auto-start after reboot, background-location permission flow
 (not needed while the service is started from the foreground), battery
 optimisation prompt, symbol rendering on the phone (shows the unit name),
 release signing config, CI.

@@ -51,6 +51,9 @@ dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 
+    // serves the bundled Situation map page over https://appassets.androidplatform.net
+    implementation("androidx.webkit:webkit:1.12.1")
+
     // encrypted storage for the device token
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

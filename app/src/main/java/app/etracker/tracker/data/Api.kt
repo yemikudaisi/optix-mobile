@@ -71,6 +71,19 @@ object Api {
         return m.optInt("interval_s", 0)
     }
 
+    /**
+     * The read-only situation picture for this device's operation (plan, live
+     * units, watch log, optionally threat). Pass back the `modified` values of
+     * the plan / IPB you already hold: an unchanged part comes back as a stub
+     * (`{"unchanged": true}`) so frequent polling stays cheap.
+     */
+    fun getSituation(site: String, token: String, planModified: String?, ipbModified: String?): JSONObject {
+        val body = JSONObject().put("token", token)
+        planModified?.let { body.put("plan_modified", it) }
+        ipbModified?.let { body.put("ipb_modified", it) }
+        return call(site, "etracker.devices.get_situation", body)
+    }
+
     private fun call(site: String, method: String, body: JSONObject): JSONObject {
         val (status, text) = post("$site/api/method/$method", body)
         if (status !in 200..299) throw ApiException(status, serverMessage(text) ?: "HTTP $status")

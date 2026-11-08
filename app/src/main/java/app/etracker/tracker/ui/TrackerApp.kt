@@ -19,6 +19,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -27,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.FixQueue
+import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.TrackerState
 import app.etracker.tracker.service.TrackingService
@@ -61,17 +65,36 @@ fun TrackerApp() {
     val ctx = LocalContext.current
     val session = remember { Session(ctx.applicationContext) }
     var enrolled by remember { mutableStateOf(session.enrolled) }
+    var tab by remember { mutableStateOf(0) } // 0 = status, 1 = situation map
     val state by TrackerState.flow.collectAsState()
 
-    // the service flips this when the server revokes the device
+    // the service (or the situation poll) flips this when the server revokes the device
     LaunchedEffect(state.revoked) { if (state.revoked) enrolled = session.enrolled }
 
-    Scaffold { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp)) {
-            if (!enrolled) {
-                OnboardingScreen(session, revoked = session.revoked) { enrolled = true }
-            } else {
-                StatusScreen(session) { enrolled = false }
+    // the situation map's WebView lives as long as the device is enrolled, so
+    // switching tabs doesn't reload it
+    val web = if (enrolled) remember { SituationWeb(ctx.applicationContext) } else null
+    DisposableEffect(web) { onDispose { web?.destroy() } }
+
+    Scaffold(
+        bottomBar = {
+            if (enrolled) {
+                NavigationBar {
+                    NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Text("◉") }, label = { Text("Status") })
+                    NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Text("◫") }, label = { Text("Situation") })
+                }
+            }
+        },
+    ) { padding ->
+        if (enrolled && tab == 1 && web != null) {
+            Column(Modifier.fillMaxSize().padding(padding)) { SituationScreen(session, web, state) }
+        } else {
+            Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp)) {
+                if (!enrolled) {
+                    OnboardingScreen(session, revoked = session.revoked) { enrolled = true; tab = 0 }
+                } else {
+                    StatusScreen(session) { enrolled = false }
+                }
             }
         }
     }
@@ -244,6 +267,7 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
                     confirmSignOut = false
                     TrackingService.stop(ctx)
                     FixQueue.get(ctx).clear()
+                    SituationCache.clear(ctx)
                     session.clear()
                     onSignedOut()
                 }) { Text("Sign out") }
