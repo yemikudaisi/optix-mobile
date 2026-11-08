@@ -25,22 +25,34 @@ eTracker server repo (summarised below).
 
 ## Build
 
-Requires Android Studio (Ladybug or newer) or JDK 17 + the Android SDK 35.
+JDK 17 + Android SDK 35 (or Android Studio Ladybug or newer). The Gradle wrapper
+is included; point it at your SDK with `local.properties` (`sdk.dir=/path/to/sdk`,
+git-ignored) or `ANDROID_HOME`.
 
 ```
-# first time only — the Gradle wrapper isn't committed
-gradle wrapper --gradle-version 8.10.2     # or just open the folder in Android Studio
-
-./gradlew assembleDebug          # app/build/outputs/apk/debug
-./gradlew installDebug           # to a connected device / emulator
+./gradlew assembleDebug          # app/build/outputs/apk/debug/app-debug.apk
+./gradlew installDebug           # to a connected device / running emulator
 ```
 
-The QR scanner needs Google Play services (a normal phone or a "Google Play"
-emulator image).
+`source tools/env.sh` puts a toolchain installed under `~/tools` on your PATH.
+
+The QR scanner and location need Google Play services (a normal phone, or an
+emulator image with "Google APIs" / "Google Play").
 
 **Talking to a dev server.** Debug builds allow plain HTTP. From the Android
-emulator, the host machine is `http://10.0.2.2:8080`; on a real phone use the
+emulator the host machine is `http://10.0.2.2:8080`; on a real phone use the
 machine's LAN address. Release builds require HTTPS.
+
+## Try it in an emulator first
+
+`tools/emulator.sh` creates an emulator (Pixel 6, Android 15, Google APIs),
+installs the debug APK and launches it. Add `--headless` for no window.
+
+In the emulator: *Extended controls (…) → Location* sets a position or plays a
+GPX route; the app reports it like a real GPS. Enrol with server
+`http://10.0.2.2:8080` and a code from the web app's *Devices* page (type it —
+the emulator's camera won't read a QR on your monitor unless you point the
+virtual scene at it).
 
 ## Try it without a phone
 
@@ -77,11 +89,10 @@ tools/simulate_device.py
 
 ## Status
 
-First version, **written without an Android toolchain available — it has not
-been compiled or run on a device yet.** The server side of the protocol *has*
-been exercised end to end with `simulate_device.py` (enrol, single and batched
-posts, burned code rejected, positions stored and shown). Expect to fix small
-compile issues on the first build.
+First version. It **compiles and builds a debug APK**. The server side of the
+protocol has been exercised end to end with `simulate_device.py` (enrol, single
+and batched posts, burned code rejected, positions stored and shown). See the
+notes below for what has and hasn't been run on an emulator/device.
 
 Not done yet: auto-start after reboot, background-location permission flow
 (not needed while the service is started from the foreground), battery
