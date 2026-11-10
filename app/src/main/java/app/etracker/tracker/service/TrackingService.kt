@@ -19,10 +19,12 @@ import androidx.core.content.ContextCompat
 import app.etracker.tracker.MainActivity
 import app.etracker.tracker.R
 import app.etracker.tracker.data.Api
+import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.Fix
 import app.etracker.tracker.data.FixQueue
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.TrackerState
+import app.etracker.tracker.data.Updater
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -68,7 +70,7 @@ class TrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!session.enrolled || !hasLocationPermission()) {
+        if (!session.enrolled || !hasLocationPermission() || DeviceReset.active) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -100,6 +102,7 @@ class TrackingService : Service() {
             .build()
         val cb = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
+                if (DeviceReset.active) return // wipe in progress: record nothing
                 result.locations.forEach { loc ->
                     // never queue something the server would reject
                     if (loc.latitude !in -90.0..90.0 || loc.longitude !in -180.0..180.0) return@forEach
@@ -137,9 +140,12 @@ class TrackingService : Service() {
     private fun startFlusher() {
         scope.launch {
             var failures = 0
-            while (isActive) {
+            while (isActive && !DeviceReset.active) {
                 // wake on a new fix, or at least once per reporting interval
                 withTimeoutOrNull(session.intervalSeconds * 1000L) { flushSignal.receive() }
+                if (DeviceReset.active) break
+                // heartbeat + update check (throttled): lets the server reach us even when no fixes are flowing
+                Updater.check(applicationContext)
                 if (flushOnce()) {
                     failures = 0
                 } else {
@@ -161,7 +167,13 @@ class TrackingService : Service() {
                 return true
             }
             try {
-                val suggested = Api.postPositions(site, token, batch.map { it.fix })
+                val pulse = Api.postPositions(site, token, batch.map { it.fix })
+                val suggested = pulse.intervalSeconds
+                if (pulse.wipe) {
+                    // the server wants this device wiped: erase everything (the queue included) and stop
+                    DeviceReset.wipe(applicationContext)
+                    return true
+                }
                 queue.delete(batch.map { it.id })
                 if (suggested in 5..3600 && suggested != session.intervalSeconds) session.updateInterval(suggested)
                 TrackerState.update {
@@ -170,9 +182,7 @@ class TrackingService : Service() {
             } catch (e: Api.ApiException) {
                 when {
                     e.authFailure -> {
-                        session.markRevoked()
-                        TrackerState.update { copy(revoked = true, status = "Revoked") }
-                        scope.launch(Dispatchers.Main) { stopSelf() }
+                        DeviceReset.signOut(applicationContext) // clean sign-out; also stops this service
                         return true
                     }
                     e.retryable -> {

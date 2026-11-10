@@ -85,6 +85,15 @@ class FixQueue private constructor(context: Context) :
     }
 
     companion object {
+        /** Remote wipe: close and delete the database file itself. */
+        @Synchronized
+        fun wipe(context: Context) {
+            val app = context.applicationContext
+            instance?.let { runCatching { it.close() } }
+            instance = null
+            app.deleteDatabase("fixes.db")
+        }
+
         const val MAX_QUEUED = 20_000
 
         @Volatile private var instance: FixQueue? = null

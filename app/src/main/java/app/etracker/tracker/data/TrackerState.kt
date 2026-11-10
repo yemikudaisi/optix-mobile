@@ -16,6 +16,8 @@ data class TrackerUi(
     val lastSentMs: Long? = null,
     val queued: Int = 0,
     val revoked: Boolean = false,
+    /** The server had this device wiped; the app is back at onboarding. */
+    val wiped: Boolean = false,
 )
 
 object TrackerState {

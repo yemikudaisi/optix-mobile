@@ -2,7 +2,9 @@ package app.etracker.tracker.data
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
@@ -51,8 +53,24 @@ object Api {
         )
     }
 
-    /** Sends up to 200 fixes (oldest first). Returns the server's suggested interval. */
-    fun postPositions(site: String, token: String, fixes: List<Fix>): Int {
+    /** What a position post tells us: the suggested interval (0 = none) and whether the server wants this device wiped. */
+    class Pulse(val intervalSeconds: Int, val wipe: Boolean)
+
+    /** A newer app version offered by the server. */
+    class AppUpdate(
+        val versionCode: Int,
+        val versionName: String,
+        val notes: String,
+        val mandatory: Boolean,
+        val size: Long,
+        val sha256: String,
+    )
+
+    /** [update] is null when this build is current; [wipe] rides along on every authenticated reply. */
+    class UpdateCheck(val update: AppUpdate?, val wipe: Boolean)
+
+    /** Sends up to 200 fixes (oldest first). */
+    fun postPositions(site: String, token: String, fixes: List<Fix>): Pulse {
         val arr = JSONArray()
         fixes.forEach { f ->
             arr.put(
@@ -67,8 +85,80 @@ object Api {
                     },
             )
         }
-        val m = call(site, "etracker.devices.post_positions", JSONObject().put("token", token).put("positions", arr))
-        return m.optInt("interval_s", 0)
+        val m = call(site, "etracker.devices.post_positions", JSONObject().put("token", token).put("positions", arr).put("app_version", app.etracker.tracker.BuildConfig.VERSION_CODE))
+        return Pulse(m.optInt("interval_s", 0), m.optBoolean("wipe", false))
+    }
+
+    /** Asks whether a newer app exists than [versionCode]. Also works as a heartbeat (carries the wipe flag). */
+    fun getAppUpdate(site: String, token: String, versionCode: Int): UpdateCheck {
+        val m = call(site, "etracker.devices.get_app_update", JSONObject().put("token", token).put("version_code", versionCode))
+        val wipe = m.optBoolean("wipe", false)
+        if (!m.optBoolean("update_available", false)) return UpdateCheck(null, wipe)
+        return UpdateCheck(
+            AppUpdate(
+                versionCode = m.getInt("version_code"),
+                versionName = m.optString("version_name"),
+                notes = m.optString("notes"),
+                mandatory = m.optBoolean("mandatory", false),
+                size = m.optLong("size", 0),
+                sha256 = m.optString("sha256").lowercase(),
+            ),
+            wipe,
+        )
+    }
+
+    /** Tells the server this device has erased itself; the server then revokes the token. */
+    fun ackWipe(site: String, token: String) {
+        call(site, "etracker.devices.ack_wipe", JSONObject().put("token", token))
+    }
+
+    /**
+     * Streams the APK to [dest] (POST, so the token stays out of URLs and logs) and
+     * returns its SHA-256 (lower-case hex). [onProgress] gets (bytes so far, total or 0).
+     */
+    fun downloadApp(site: String, token: String, dest: File, expectedSize: Long, onProgress: (Long, Long) -> Unit): String {
+        val conn = try {
+            URL("$site/api/method/etracker.devices.download_app").openConnection() as HttpURLConnection
+        } catch (e: Exception) {
+            throw ApiException(0, "Bad server address")
+        }
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 30_000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(JSONObject().put("token", token).toString().toByteArray(Charsets.UTF_8)) }
+            val status = conn.responseCode
+            if (status !in 200..299) {
+                val text = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                throw ApiException(status, serverMessage(text) ?: "HTTP $status")
+            }
+            val total = conn.contentLengthLong.takeIf { it > 0 } ?: expectedSize
+            val md = MessageDigest.getInstance("SHA-256")
+            var done = 0L
+            var lastReport = 0L
+            conn.inputStream.use { input ->
+                dest.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        md.update(buf, 0, n)
+                        done += n
+                        val now = System.currentTimeMillis()
+                        if (now - lastReport > 150) { lastReport = now; onProgress(done, total) }
+                    }
+                }
+            }
+            onProgress(done, total)
+            return md.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: IOException) {
+            throw ApiException(0, e.message ?: "Network error")
+        } finally {
+            conn.disconnect()
+        }
     }
 
     /**
@@ -82,6 +172,16 @@ object Api {
         planModified?.let { body.put("plan_modified", it) }
         ipbModified?.let { body.put("ipb_modified", it) }
         return call(site, "etracker.devices.get_situation", body)
+    }
+
+    /**
+     * A field report from the Situation page (task status or a target observation),
+     * posted as JSON. The server answers with the created Watch entry / updated task.
+     * Returns the server's `message` as JSON text.
+     */
+    fun postReport(site: String, token: String, reportJson: String): String {
+        val body = JSONObject().put("token", token).put("report", reportJson)
+        return call(site, "etracker.devices.post_report", body).toString()
     }
 
     private fun call(site: String, method: String, body: JSONObject): JSONObject {

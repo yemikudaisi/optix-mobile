@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -43,7 +44,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.etracker.tracker.BuildConfig
+import app.etracker.tracker.data.UpdatePhase
 import app.etracker.tracker.data.Api
+import app.etracker.tracker.data.DeviceReset
+import app.etracker.tracker.data.Updater
+import kotlinx.coroutines.delay
 import app.etracker.tracker.data.FixQueue
 import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.Session
@@ -69,7 +75,17 @@ fun TrackerApp() {
     val state by TrackerState.flow.collectAsState()
 
     // the service (or the situation poll) flips this when the server revokes the device
-    LaunchedEffect(state.revoked) { if (state.revoked) enrolled = session.enrolled }
+    LaunchedEffect(state.revoked, state.wiped) { if (state.revoked || state.wiped) enrolled = session.enrolled }
+
+    // update check at start and every few hours while the app is open (the tracking
+    // service also checks, throttled, so a phone left in a pocket hears about updates and wipes)
+    LaunchedEffect(enrolled) {
+        while (enrolled) {
+            withContext(Dispatchers.IO) { Updater.check(ctx) }
+            delay(3 * 60 * 60 * 1000L)
+        }
+    }
+    if (enrolled) UpdatePrompt()
 
     // the situation map's WebView lives as long as the device is enrolled, so
     // switching tabs doesn't reload it
@@ -91,7 +107,12 @@ fun TrackerApp() {
         } else {
             Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp)) {
                 if (!enrolled) {
-                    OnboardingScreen(session, revoked = session.revoked) { enrolled = true; tab = 0 }
+                    OnboardingScreen(session, revoked = session.revoked, wiped = state.wiped || DeviceReset.hasNotice(ctx)) {
+                        DeviceReset.clearNotice(ctx)
+                        TrackerState.update { copy(wiped = false, revoked = false, status = "Stopped") }
+                        enrolled = true
+                        tab = 0
+                    }
                 } else {
                     StatusScreen(session) { enrolled = false }
                 }
@@ -103,7 +124,7 @@ fun TrackerApp() {
 // ---------------------------------------------------------------- onboarding
 
 @Composable
-private fun OnboardingScreen(session: Session, revoked: Boolean, onEnrolled: () -> Unit) {
+private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean, onEnrolled: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var site by remember { mutableStateOf(session.lastSite ?: "https://") }
@@ -152,7 +173,10 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, onEnrolled: () 
         "Ask your operator for an enrolment code in the eTracker web app (Devices), then scan the QR or type the code.",
         style = MaterialTheme.typography.bodyMedium,
     )
-    if (revoked) {
+    if (wiped) {
+        Spacer(Modifier.height(12.dp))
+        Text("This device was reset by an administrator.", color = MaterialTheme.colorScheme.error)
+    } else if (revoked) {
         Spacer(Modifier.height(12.dp))
         Text(
             "This device was revoked by the server. Ask for a new enrolment code.",
@@ -266,6 +290,7 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
                 TextButton(onClick = {
                     confirmSignOut = false
                     TrackingService.stop(ctx)
+                    DeviceReset.clearNotice(ctx)
                     FixQueue.get(ctx).clear()
                     SituationCache.clear(ctx)
                     session.clear()
@@ -288,3 +313,76 @@ private fun Mono(text: String) {
 }
 
 private fun clock(ms: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(ms))
+
+// -------------------------------------------------------------------- updates
+
+/** One dialog for the whole update flow; a mandatory update has no "Later". */
+@Composable
+private fun UpdatePrompt() {
+    val ctx = LocalContext.current
+    val phase by Updater.phase.collectAsState()
+
+    fun size(b: Long) = if (b <= 0) "" else " (%.1f MB)".format(b / 1048576.0)
+    fun head(i: Api.AppUpdate) = "Version ${i.versionName.ifBlank { i.versionCode.toString() }}${size(i.size)}"
+
+    when (val p = phase) {
+        UpdatePhase.Idle -> {}
+        is UpdatePhase.Available -> AlertDialog(
+            onDismissRequest = { if (!p.info.mandatory) Updater.later() },
+            title = { Text(if (p.info.mandatory) "Update required" else "Update available") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(head(p.info), fontWeight = FontWeight.Bold)
+                    Text("You have ${BuildConfig.VERSION_NAME}.", style = MaterialTheme.typography.bodySmall)
+                    if (p.info.notes.isNotBlank()) Text(p.info.notes)
+                    if (p.info.mandatory) Text("This version is required to keep reporting with the server.", style = MaterialTheme.typography.bodySmall)
+                    Text("Your queued positions and reports are kept.", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { Updater.start(ctx, p.info) }) { Text("Update now") } },
+            dismissButton = if (p.info.mandatory) null else ({ TextButton(onClick = { Updater.later() }) { Text("Later") } }),
+        )
+        is UpdatePhase.NeedsPermission -> AlertDialog(
+            onDismissRequest = { if (!p.info.mandatory) Updater.later() },
+            title = { Text("Allow installing updates") },
+            text = {
+                Text(
+                    "Android needs your permission before this app can install its own updates. " +
+                        "Tap Open settings, switch on \"Allow from this source\", then come back: the update continues automatically.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { Updater.openInstallSettings(ctx) }) { Text("Open settings") } },
+            dismissButton = if (p.info.mandatory) null else ({ TextButton(onClick = { Updater.later() }) { Text("Later") } }),
+        )
+        is UpdatePhase.Downloading -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Downloading update") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(head(p.info))
+                    if (p.total > 0) {
+                        LinearProgressIndicator(progress = { (p.done.toFloat() / p.total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                        Text("%.1f of %.1f MB".format(p.done / 1048576.0, p.total / 1048576.0), style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+        is UpdatePhase.Ready -> AlertDialog(
+            onDismissRequest = { if (!p.info.mandatory) Updater.later() },
+            title = { Text("Ready to install") },
+            text = { Text("${head(p.info)} is downloaded and verified. Confirm in the Android installer. If it did not appear, tap Install.") },
+            confirmButton = { TextButton(onClick = { Updater.install(ctx, p.file) }) { Text("Install") } },
+            dismissButton = if (p.info.mandatory) null else ({ TextButton(onClick = { Updater.later() }) { Text("Later") } }),
+        )
+        is UpdatePhase.Failed -> AlertDialog(
+            onDismissRequest = { if (!p.info.mandatory) Updater.later() },
+            title = { Text("Update failed") },
+            text = { Text(p.message + "\n\nNothing was lost: queued positions and reports are still on the phone.") },
+            confirmButton = { TextButton(onClick = { Updater.start(ctx, p.info) }) { Text("Try again") } },
+            dismissButton = if (p.info.mandatory) null else ({ TextButton(onClick = { Updater.later() }) { Text("Later") } }),
+        )
+    }
+}

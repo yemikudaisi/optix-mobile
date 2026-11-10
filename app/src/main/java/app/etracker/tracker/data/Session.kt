@@ -72,6 +72,11 @@ class Session(context: Context) {
         prefs.edit().clear().putString("last_site", keep).apply()
     }
 
+    /** Remote wipe: forget everything, including the server address. */
+    fun wipe() {
+        prefs.edit().clear().commit()
+    }
+
     fun updateInterval(seconds: Int) {
         prefs.edit().putInt("interval", seconds).apply()
     }

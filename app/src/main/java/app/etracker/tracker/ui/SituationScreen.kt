@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -19,12 +20,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewAssetLoader
 import app.etracker.tracker.data.Api
+import app.etracker.tracker.data.DeviceReset
+import app.etracker.tracker.data.Updater
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.TrackerState
 import app.etracker.tracker.data.TrackerUi
 import app.etracker.tracker.service.TrackingService
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -43,12 +49,14 @@ private const val POLL_MS = 10_000L
  * Native code owns auth and networking and pushes data in through the page's
  * `Situation` JavaScript API.
  */
-class SituationWeb(context: Context) {
+class SituationWeb(private val context: Context) {
     private val loader = WebViewAssetLoader.Builder()
         .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
         .build()
 
     val view: WebView = WebView(context)
+    private val session = Session(context)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
     private var ready = false
     private val queued = ArrayList<String>()
@@ -66,6 +74,9 @@ class SituationWeb(context: Context) {
             allowFileAccess = false
             allowContentAccess = false
         }
+        // field reports (task status, marked targets) go out through the native client,
+        // which owns the device token; the page never sees it
+        view.addJavascriptInterface(ReportBridge(), "EtrackerNative")
         if (debuggable) {
             WebView.setWebContentsDebuggingEnabled(true) // chrome://inspect on debug builds
         }
@@ -96,6 +107,37 @@ class SituationWeb(context: Context) {
         }
     }
 
+    /** Exposed to the page as `EtrackerNative`; the answer comes back via Situation.reportResult. */
+    inner class ReportBridge {
+        @JavascriptInterface
+        fun submit(id: String, reportJson: String) {
+            scope.launch {
+                val site = session.site
+                val token = session.token
+                if (site == null || token == null) {
+                    reply(id, false, false, "Device is not enrolled", "null")
+                    return@launch
+                }
+                try {
+                    val result = Api.postReport(site, token, reportJson)
+                    reply(id, true, false, "", result)
+                    // the server piggy-backs the wipe order on its reply
+                    if (runCatching { JSONObject(result).optBoolean("wipe", false) }.getOrDefault(false)) DeviceReset.wipe(context)
+                } catch (e: Api.ApiException) {
+                    reply(id, false, e.retryable, Api.describe(e), "null")
+                    if (e.authFailure) DeviceReset.signOut(context)
+                } catch (e: Exception) {
+                    reply(id, false, true, e.message ?: "Error", "null")
+                }
+            }
+        }
+    }
+
+    private fun reply(id: String, ok: Boolean, retry: Boolean, msg: String, json: String) {
+        val code = "Situation.reportResult(${JSONObject.quote(id)},$ok,$retry,${JSONObject.quote(msg)},${JSONObject.quote(json)})"
+        view.post { js(code) } // evaluateJavascript must run on the main thread
+    }
+
     private fun js(code: String) {
         if (ready) view.evaluateJavascript(code, null) else queued.add(code)
     }
@@ -111,6 +153,7 @@ class SituationWeb(context: Context) {
     }
 
     fun destroy() {
+        scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         view.stopLoading()
         view.destroy()
     }
@@ -127,6 +170,9 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
         if (la != null && lo != null) web.setSelf(la, lo, state.accuracy ?: 0f)
     }
 
+    // opening the Situation tab also checks for an app update (throttled)
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Updater.check(ctx) } }
+
     // show the saved picture straight away, then keep it fresh while this tab is open
     LaunchedEffect(Unit) {
         var last: JSONObject? = SituationCache.load(ctx)
@@ -142,6 +188,11 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                 val next = withContext(Dispatchers.IO) {
                     Api.getSituation(site, token, SituationCache.modified(last, "plan"), SituationCache.modified(last, "ipb"))
                 }
+                if (next.optBoolean("wipe", false)) {
+                    // server order: erase this app's data now (the wipe also ends this loop)
+                    DeviceReset.wipe(ctx)
+                    break
+                }
                 val merged = SituationCache.merge(last, next)
                 last = merged
                 withContext(Dispatchers.IO) { SituationCache.save(ctx, merged) }
@@ -150,10 +201,7 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
             } catch (e: Api.ApiException) {
                 if (e.authFailure) {
                     // the server no longer accepts this device: back to onboarding
-                    session.markRevoked()
-                    SituationCache.clear(ctx)
-                    TrackingService.stop(ctx)
-                    TrackerState.update { copy(revoked = true, status = "Revoked") }
+                    DeviceReset.signOut(ctx)
                     break
                 }
                 val saved = last?.let { "Offline — showing data from ${clock(SituationCache.fileTime(ctx))}" }
