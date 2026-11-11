@@ -29,6 +29,15 @@ OPTIX server repo (yemikudaisi/etracker) (summarised below).
   keeps the last picture for offline use. What a device may see is set per device
   on the Devices page (*Own operation* / *None*; the threat/IPB layer is a
   separate, off-by-default tick).
+* **Offline maps** — the server publishes MBTiles packs per map sheet (plus an
+  overview per series and custom packs). The Status tab's *Offline maps* card
+  lists *Overview*, *Sheets for your AO* (sheet number + name in sheet order, one
+  *Download all for my AO* button, Update / Download / Delete per sheet) and
+  *Custom*. *Download on Wi-Fi automatically* is **on by default**. When a sheet is
+  re-issued, the old sheet stays on the phone and on the map until the new one has
+  downloaded and passed its SHA-256 check, then it is replaced ("Sheet updated").
+  The Situation map draws overview < sheets < custom under the online map.
+  Run `./gradlew :app:testDebugUnitTest` for the sheet-replacement rules (JUnit 4).
 * **Revocation** — if the server rejects the token (operator revoked the
   device) reporting stops and the app returns to onboarding.
 * **Remote wipe** — an administrator can order a wipe on the Devices page. Every

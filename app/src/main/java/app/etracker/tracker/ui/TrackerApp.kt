@@ -63,6 +63,7 @@ import kotlinx.coroutines.delay
 import app.etracker.tracker.data.FixQueue
 import app.etracker.tracker.data.MapPacks
 import app.etracker.tracker.data.PackRow
+import app.etracker.tracker.data.PackSlots
 import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.TrackerState
@@ -522,8 +523,9 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
 
 /**
  * "Offline maps": the map packs the server offers this phone (its operation's, and those for every
- * operation), what is downloaded, Download / Update / Delete with progress, and the
- * "Download on Wi-Fi automatically" switch (off by default; remembered).
+ * operation), grouped as Overview / Sheets for your AO (natural sheet order, one "Download all for
+ * my AO" button) / Custom, with Download / Update / Delete and progress on each line, and the
+ * "Download on Wi-Fi automatically" switch (on by default; remembered).
  */
 @Composable
 private fun OfflineMapsCard() {
@@ -550,11 +552,66 @@ private fun OfflineMapsCard() {
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
-            rows.forEach { r -> PackLine(r, onDownload = { MapPacks.download(ctx, r.info.id) }, onCancel = { MapPacks.cancel(ctx, r.info.id) }, onDelete = { confirmDelete = r }) }
+            val line = @Composable { r: PackRow ->
+                PackLine(
+                    r,
+                    onDownload = { MapPacks.download(ctx, r.info.id) },
+                    onCancel = { MapPacks.cancel(ctx, r.info.id) },
+                    onDelete = { confirmDelete = r },
+                )
+            }
+            val overview = rows.filter { it.info.kind == "overview" }
+            val sheets = rows.filter { it.info.kind == "sheet" }
+                .sortedWith(compareBy<PackRow> { it.info.seriesLabel.ifBlank { it.info.series } }.thenBy(PackSlots.naturalOrder) { it.info.sheetNo })
+            val custom = rows.filter { it.info.kind != "overview" && it.info.kind != "sheet" }
+
+            if (overview.isNotEmpty()) {
+                SectionTitle("Overview")
+                overview.forEach { line(it) }
+            }
+            if (sheets.isNotEmpty() || overview.isNotEmpty()) {
+                SectionTitle("Sheets for your AO")
+                val need = MapPacks.neededForAo(rows)
+                val busy = need.isNotEmpty() && need.all { it.progress != null || it.waiting }
+                if (need.isEmpty()) {
+                    Text(
+                        if (sheets.isEmpty()) "No map sheets are published for your area yet." else "✓ All sheets downloaded",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (sheets.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    val n = need.count { it.info.kind == "sheet" }
+                    val withOverview = need.any { it.info.kind == "overview" }
+                    val what = listOfNotNull(
+                        if (n > 0) (if (n == 1) "1 sheet" else "$n sheets") else null,
+                        if (withOverview) "overview" else null,
+                    ).joinToString(" + ") + ", " + sizeText(need.sumOf { it.info.size })
+                    Button(onClick = { MapPacks.downloadAll(ctx) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (busy) "Downloading ($what)…" else "Download all for my AO ($what)")
+                    }
+                }
+                var lastSeries: String? = null
+                sheets.forEach { r ->
+                    val s = r.info.seriesLabel.ifBlank { r.info.series }
+                    if (s.isNotBlank() && s != lastSeries) {
+                        Text(s, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    lastSeries = s
+                    line(r)
+                }
+            }
+            if (custom.isNotEmpty()) {
+                if (sheets.isNotEmpty() || overview.isNotEmpty()) SectionTitle("Custom")
+                custom.forEach { line(it) }
+            }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
                     Text("Download on Wi-Fi automatically", style = MaterialTheme.typography.bodyMedium)
-                    Text("Off: maps download only when you tap Download.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (auto) "On: new and updated sheets download by themselves on Wi-Fi." else "Off: maps download only when you tap Download.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Switch(checked = auto, onCheckedChange = { MapPacks.setAutoWifi(ctx, it) })
             }
@@ -566,9 +623,11 @@ private fun OfflineMapsCard() {
     confirmDelete?.let { r ->
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
-            title = { Text("Delete ${r.info.title}?") },
+            title = { Text("Delete ${r.info.label}?") },
             text = { Text(if (r.offered) "It is removed from this phone. You can download it again while it is published." else "It is removed from this phone.") },
-            confirmButton = { TextButton(onClick = { MapPacks.delete(ctx, r.info.id); confirmDelete = null }) { Text("Delete") } },
+            confirmButton = {
+                TextButton(onClick = { r.onPhoneId?.let { MapPacks.delete(ctx, it) }; confirmDelete = null }) { Text("Delete") }
+            },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
         )
     }
@@ -576,32 +635,63 @@ private fun OfflineMapsCard() {
 
 @Composable
 private fun PackLine(r: PackRow, onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit) {
-    val mb = { b: Long -> if (b >= 1073741824) "%.2f GB".format(b / 1073741824.0) else "%.1f MB".format(b / 1048576.0) }
+    val sheet = r.info.kind == "sheet"
+    val onPhone = r.onPhoneId != null
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(r.info.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-        Mono("z${r.info.minZoom}–${r.info.maxZoom} · ${mb(r.info.size)} · ${r.info.format.uppercase(Locale.ROOT)}")
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(r.info.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
+            if (r.recentlyUpdated && r.progress == null) {
+                Text(
+                    if (sheet) "Sheet updated" else "Updated",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+        }
+        Mono(
+            if (sheet) "${sizeText(r.info.size)} · z${r.info.minZoom}–${r.info.maxZoom}"
+            else "z${r.info.minZoom}–${r.info.maxZoom} · ${sizeText(r.info.size)} · ${r.info.format.uppercase(Locale.ROOT)}",
+        )
         val p = r.progress
         when {
             p != null -> {
                 if (p.second > 0) LinearProgressIndicator(progress = { (p.first.toFloat() / p.second).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                 else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                Text("Downloading ${mb(p.first)} of ${mb(p.second)}", style = MaterialTheme.typography.bodySmall)
+                val pct = if (p.second > 0) " ${(p.first * 100 / p.second).coerceIn(0, 100)}%" else ""
+                Text(
+                    (if (r.replaces != null) "Updating…$pct" else "Downloading$pct") + " (${sizeText(p.first)} of ${sizeText(p.second)})",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
-            r.needsUpdate -> Text("A newer version is published.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-            r.installed -> Text("✓ Downloaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            r.waiting -> Text("Waiting to download…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            r.replaces != null -> Text(
+                if (sheet) "Sheet updated — tap Update. The old sheet stays on the map until then." else "A newer version is published — tap Update.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+            r.needsUpdate -> Text("Update available", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            r.installed -> Text("✓ Installed", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             else -> Text("Not downloaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         r.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             when {
-                p != null -> OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                p != null || r.waiting -> OutlinedButton(onClick = onCancel) { Text("Cancel") }
                 r.offered && r.needsUpdate -> Button(onClick = onDownload) { Text("Update") }
                 r.offered && !r.installed -> Button(onClick = onDownload) { Text("Download") }
             }
-            if (r.installed && p == null) OutlinedButton(onClick = onDelete) { Text("Delete") }
+            if (onPhone && p == null && !r.waiting) OutlinedButton(onClick = onDelete) { Text("Delete") }
         }
     }
 }
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(text, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+}
+
+private fun sizeText(b: Long): String =
+    if (b >= 1073741824) "%.2f GB".format(b / 1073741824.0) else "%.1f MB".format(b / 1048576.0)
 
 /** Auto / Light / Dark. Auto follows the Android setting; the choice is remembered. */
 @OptIn(ExperimentalMaterial3Api::class)
