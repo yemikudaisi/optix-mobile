@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,6 +61,8 @@ import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.Updater
 import kotlinx.coroutines.delay
 import app.etracker.tracker.data.FixQueue
+import app.etracker.tracker.data.MapPacks
+import app.etracker.tracker.data.PackRow
 import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.TrackerState
@@ -487,6 +490,9 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
     )
 
     Spacer(Modifier.height(16.dp))
+    OfflineMapsCard()
+
+    Spacer(Modifier.height(16.dp))
     ThemeRow()
 
     Spacer(Modifier.height(24.dp))
@@ -504,12 +510,96 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
                     DeviceReset.clearNotice(ctx)
                     FixQueue.get(ctx).clear()
                     SituationCache.clear(ctx)
+                    MapPacks.clear(ctx)
                     session.clear()
                     onSignedOut()
                 }) { Text("Sign out") }
             },
             dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
         )
+    }
+}
+
+/**
+ * "Offline maps": the map packs the server offers this phone (its operation's, and those for every
+ * operation), what is downloaded, Download / Update / Delete with progress, and the
+ * "Download on Wi-Fi automatically" switch (off by default; remembered).
+ */
+@Composable
+private fun OfflineMapsCard() {
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { MapPacks.load(ctx) } }
+    val rows by MapPacks.rows.collectAsState()
+    val auto by MapPacks.autoWifi.collectAsState()
+    val known by MapPacks.known.collectAsState()
+    val refreshing by MapPacks.refreshing.collectAsState()
+    val note by MapPacks.note.collectAsState()
+    var confirmDelete by remember { mutableStateOf<PackRow?>(null) }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Offline maps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Maps of your area of operation for when there is no internet. The Situation map shows them under the online map.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (rows.isEmpty()) {
+                Text(
+                    if (known) "No offline maps are published for your operation." else "Not checked yet: open the Situation tab or tap Refresh.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            rows.forEach { r -> PackLine(r, onDownload = { MapPacks.download(ctx, r.info.id) }, onCancel = { MapPacks.cancel(ctx, r.info.id) }, onDelete = { confirmDelete = r }) }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("Download on Wi-Fi automatically", style = MaterialTheme.typography.bodyMedium)
+                    Text("Off: maps download only when you tap Download.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = auto, onCheckedChange = { MapPacks.setAutoWifi(ctx, it) })
+            }
+            TextButton(onClick = { MapPacks.refresh(ctx) }, enabled = !refreshing) { Text(if (refreshing) "Checking…" else "Refresh list") }
+            note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        }
+    }
+
+    confirmDelete?.let { r ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Delete ${r.info.title}?") },
+            text = { Text(if (r.offered) "It is removed from this phone. You can download it again while it is published." else "It is removed from this phone.") },
+            confirmButton = { TextButton(onClick = { MapPacks.delete(ctx, r.info.id); confirmDelete = null }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun PackLine(r: PackRow, onDownload: () -> Unit, onCancel: () -> Unit, onDelete: () -> Unit) {
+    val mb = { b: Long -> if (b >= 1073741824) "%.2f GB".format(b / 1073741824.0) else "%.1f MB".format(b / 1048576.0) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(r.info.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        Mono("z${r.info.minZoom}–${r.info.maxZoom} · ${mb(r.info.size)} · ${r.info.format.uppercase(Locale.ROOT)}")
+        val p = r.progress
+        when {
+            p != null -> {
+                if (p.second > 0) LinearProgressIndicator(progress = { (p.first.toFloat() / p.second).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text("Downloading ${mb(p.first)} of ${mb(p.second)}", style = MaterialTheme.typography.bodySmall)
+            }
+            r.needsUpdate -> Text("A newer version is published.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+            r.installed -> Text("✓ Downloaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            else -> Text("Not downloaded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        r.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when {
+                p != null -> OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                r.offered && r.needsUpdate -> Button(onClick = onDownload) { Text("Update") }
+                r.offered && !r.installed -> Button(onClick = onDownload) { Text("Download") }
+            }
+            if (r.installed && p == null) OutlinedButton(onClick = onDelete) { Text("Delete") }
+        }
     }
 }
 

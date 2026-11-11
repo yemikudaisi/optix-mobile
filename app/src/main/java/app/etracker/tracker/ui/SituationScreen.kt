@@ -16,6 +16,8 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -24,6 +26,7 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewFeature
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
+import app.etracker.tracker.data.MapPacks
 import app.etracker.tracker.data.Updater
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.SituationCache
@@ -98,8 +101,12 @@ class SituationWeb(private val context: Context) {
             if (r - l != orr - ol || b - t != ob - ot) js("Situation.resize()")
         }
         view.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(v: WebView?, request: WebResourceRequest?): WebResourceResponse? =
-                request?.url?.let { loader.shouldInterceptRequest(it) }
+            override fun shouldInterceptRequest(v: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                val url = request?.url ?: return null
+                // offline map tiles: answered from the downloaded MBTiles files, never from the network
+                if (url.host == MapPacks.TILE_HOST) return MapPacks.serve(context, url)
+                return loader.shouldInterceptRequest(url)
+            }
 
             override fun onPageFinished(v: WebView?, url: String?) {
                 ready = true
@@ -166,6 +173,10 @@ class SituationWeb(private val context: Context) {
     fun setStatus(text: String, level: String) = js("Situation.setStatus(${JSONObject.quote(text)},'$level')")
     /** When the picture shown was fetched (this phone's clock): the page shows NOT LIVE once it is old. */
     fun setFreshness(ms: Long) = js("Situation.setFreshness($ms)")
+    /** The offline map packs installed on this phone (JSON array; see MapPacks.pageJson). */
+    fun setOfflinePacks(json: String) = js("Situation.setOfflinePacks && Situation.setOfflinePacks(${JSONObject.quote(json)})")
+    /** Whether the phone has a network: with none, the page marks the map as the offline one. */
+    fun setConnectivity(online: Boolean) = js("Situation.setConnectivity && Situation.setConnectivity($online)")
 
     /** Detach from any previous parent so Compose can host it again after a tab switch. */
     fun attach(): WebView {
@@ -195,6 +206,13 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
         if (la != null && lo != null) web.setSelf(la, lo, state.accuracy ?: 0f)
     }
 
+    // offline map packs: tell the page what is installed (again whenever a download finishes or a pack goes)
+    val packRows by MapPacks.rows.collectAsState()
+    LaunchedEffect(packRows) {
+        val json = withContext(Dispatchers.IO) { MapPacks.load(ctx); MapPacks.pageJson(ctx) }
+        web.setOfflinePacks(json)
+    }
+
     // opening the Situation tab also checks for an app update (throttled)
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Updater.check(ctx) } }
 
@@ -210,9 +228,10 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
             val site = session.site
             val token = session.token
             if (site == null || token == null) break
+            web.setConnectivity(Updater.isOnline(ctx))
             try {
                 val next = withContext(Dispatchers.IO) {
-                    Api.getSituation(site, token, SituationCache.modified(last, "plan"), SituationCache.modified(last, "ipb"))
+                    Api.getSituation(site, token, SituationCache.modified(last, "plan"), SituationCache.modified(last, "ipb"), MapPacks.heldParam(ctx))
                 }
                 if (next.optBoolean("wipe", false)) {
                     // server order: erase this app's data now (the wipe also ends this loop)
@@ -222,6 +241,8 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                 next.optJSONObject("me")?.let {
                     session.updateHolder(it.optString("holderName"), it.optString("appointment", "Other"), it.optBoolean("primary", false), it.optBoolean("unverified", false))
                 }
+                // packs no longer offered are deleted; with auto-download on (Wi-Fi), new ones are fetched
+                withContext(Dispatchers.IO) { MapPacks.onServerList(ctx, next.optJSONArray("mapPacks"), next.has("mapPacks")) }
                 val merged = SituationCache.merge(last, next)
                 last = merged
                 withContext(Dispatchers.IO) { SituationCache.save(ctx, merged) }
