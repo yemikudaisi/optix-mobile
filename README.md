@@ -4,7 +4,7 @@ The field app for the OPTIX server (formerly "eTracker Device"). The Android
 package ID stays `app.etracker.tracker` so installed phones keep self-updating;
 changing it would make Android treat it as a new app (uninstall and re-enrol).
 
- A phone **enrols** with a one-time code
+A phone **enrols** with a one-time code
 from the web app, then **reports its GPS position**, which the server draws on
 the Situation Map with the unit's symbol (alongside the plan, IPB, watch log and
 the other live devices).

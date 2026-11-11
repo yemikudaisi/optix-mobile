@@ -12,8 +12,8 @@ android {
         applicationId = "app.etracker.tracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.5.3"
+        versionCode = 9
+        versionName = "0.6.0"
     }
 
     buildTypes {
