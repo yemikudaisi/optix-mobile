@@ -60,6 +60,7 @@ import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.Updater
 import kotlinx.coroutines.delay
+import app.etracker.tracker.data.FieldOutbox
 import app.etracker.tracker.data.FixQueue
 import app.etracker.tracker.data.MapPacks
 import app.etracker.tracker.data.PackRow
@@ -424,6 +425,9 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
     }
     Text(session.unit.ifBlank { session.label }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
     Text("${session.label} · ${session.device}", style = MaterialTheme.typography.bodyMedium)
+    // SOS and check-in come first: they are what a soldier opens the app for under pressure
+    Spacer(Modifier.height(16.dp))
+    FieldPanel()
     holder?.let { h ->
         Spacer(Modifier.height(12.dp))
         Card(Modifier.fillMaxWidth()) {
@@ -503,13 +507,14 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmSignOut = false },
             title = { Text("Sign out?") },
-            text = { Text("Reporting stops and queued positions are discarded. You'll need a new enrolment code to report again.") },
+            text = { Text("Reporting stops and queued positions, SOS and check-ins are discarded. You'll need a new enrolment code to report again.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmSignOut = false
                     TrackingService.stop(ctx)
                     DeviceReset.clearNotice(ctx)
                     FixQueue.get(ctx).clear()
+                    FieldOutbox.clear(ctx)
                     SituationCache.clear(ctx)
                     MapPacks.clear(ctx)
                     session.clear()

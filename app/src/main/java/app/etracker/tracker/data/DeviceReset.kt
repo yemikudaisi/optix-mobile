@@ -101,6 +101,7 @@ object DeviceReset {
         // 3. erase local data
         sess.wipe()
         FixQueue.wipe(app)
+        FieldOutbox.clear(app) // queued SOS / check-in and the in-memory SOS picture
         SituationCache.clear(app)
         MapPacks.clear(app) // close the open map files before they are erased
         eraseFiles(app)
@@ -178,6 +179,7 @@ object DeviceReset {
         if (!session.enrolled) return
         session.markRevoked()
         FixQueue.get(app).clear()
+        FieldOutbox.clear(app) // nothing queued can be sent with a dead token
         SituationCache.clear(app)
         MapPacks.clear(app) // the operation's maps are not left on a phone the server has dropped
         TrackerState.update { copy(revoked = true, status = "Revoked") }
