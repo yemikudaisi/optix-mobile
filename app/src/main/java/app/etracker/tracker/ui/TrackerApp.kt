@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -149,6 +151,9 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
     var name by remember { mutableStateOf(last?.name ?: "") }
     var appointment by remember { mutableStateOf(last?.appointment ?: "") }
     var lookup by remember { mutableStateOf<Api.Lookup?>(null) }
+    // The PIN lives only in these two fields: never saved, never put in the session or a log.
+    var pin by remember { mutableStateOf("") }
+    var pin2 by remember { mutableStateOf("") }
 
     /** Checks the code (not used up) and moves on to the holder form. */
     fun next(s: String, c: String) {
@@ -194,7 +199,9 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
             busy = true
             error = null
             try {
-                val e = withContext(Dispatchers.IO) { Api.enrol(site, code, pn, name, appointment) }
+                val e = withContext(Dispatchers.IO) { Api.enrol(site, code, pn, name, appointment, pin) }
+                pin = ""
+                pin2 = ""
                 session.save(site, e)
                 onEnrolled()
             } catch (ex: Exception) {
@@ -274,7 +281,7 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
         )
         Spacer(Modifier.height(16.dp))
         OutlinedTextField(
-            value = pn, onValueChange = { pn = it.uppercase().filter { c -> !c.isWhitespace() }; lookup = null }, label = { Text("Personnel number") },
+            value = pn, onValueChange = { pn = it.uppercase().filter { c -> !c.isWhitespace() }; lookup = null; pin = ""; pin2 = "" }, label = { Text("Personnel number") },
             singleLine = true, enabled = !busy,
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
             modifier = Modifier.fillMaxWidth(),
@@ -296,6 +303,44 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
         blocked?.let {
             Spacer(Modifier.height(8.dp))
             Text(it, color = MaterialTheme.colorScheme.error)
+        }
+        val pinMode = lookup?.pin ?: "none"
+        if (pinMode == "set" || pinMode == "first") {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (pinMode == "first") "Your number has no PIN yet. Choose a PIN of 6 to 8 digits; you will need it to enrol this number again (for example on a new phone)."
+                else "Enter your PIN.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = pin, onValueChange = { pin = it.filter { c -> c.isDigit() }.take(8) },
+                label = { Text(if (pinMode == "first") "Choose a PIN" else "PIN") },
+                singleLine = true, enabled = !busy, visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (pinMode == "first") {
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = pin2, onValueChange = { pin2 = it.filter { c -> c.isDigit() }.take(8) },
+                    label = { Text("Repeat the PIN") }, singleLine = true, enabled = !busy,
+                    isError = pin2.isNotEmpty() && pin2 != pin,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        } else if (pinMode == "locked") {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Too many wrong PINs for this number. Try again in ${lookup?.lockMinutes ?: 15} minutes, or ask an administrator.",
+                color = MaterialTheme.colorScheme.error,
+            )
+        } else if (pinMode == "unavailable") {
+            Spacer(Modifier.height(8.dp))
+            Text("No PIN is set for this number. Ask an administrator to set one, then try again.", color = MaterialTheme.colorScheme.error)
         }
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
@@ -322,10 +367,16 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
         Spacer(Modifier.height(16.dp))
         Button(
             onClick = ::enrol,
-            enabled = !busy && pn.isNotBlank() && name.isNotBlank() && appointment.isNotBlank() && blocked == null,
+            enabled = !busy && lookup != null && pn.isNotBlank() && name.isNotBlank() && appointment.isNotBlank() && blocked == null &&
+                when (pinMode) {
+                    "set" -> pin.length in 6..8
+                    "first" -> pin.length in 6..8 && pin == pin2
+                    "locked", "unavailable" -> false
+                    else -> true
+                },
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (busy) "Enrolling…" else "Enrol") }
-        TextButton(onClick = { step = 0; error = null; lookup = null }, enabled = !busy) { Text("Back") }
+        TextButton(onClick = { step = 0; error = null; lookup = null; pin = ""; pin2 = "" }, enabled = !busy) { Text("Back") }
     }
     error?.let {
         Spacer(Modifier.height(12.dp))
