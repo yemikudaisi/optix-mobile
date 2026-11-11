@@ -102,6 +102,7 @@ object DeviceReset {
         sess.wipe()
         FixQueue.wipe(app)
         SituationCache.clear(app)
+        MapPacks.clear(app) // close the open map files before they are erased
         eraseFiles(app)
         clearOtherPrefs(app)
         clearWebStorage(app)
@@ -178,6 +179,7 @@ object DeviceReset {
         session.markRevoked()
         FixQueue.get(app).clear()
         SituationCache.clear(app)
+        MapPacks.clear(app) // the operation's maps are not left on a phone the server has dropped
         TrackerState.update { copy(revoked = true, status = "Revoked") }
         TrackingService.stop(app)
     }

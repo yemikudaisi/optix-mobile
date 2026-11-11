@@ -212,15 +212,75 @@ object Api {
     }
 
     /**
+     * Downloads offline map pack [pack] into [dest] (POST: the token stays out of URLs and logs).
+     * A non-empty [dest] is resumed with `Range: bytes=<length>-` (206 appends); a 200 starts it
+     * over; a 416 (the partial file is not a prefix any more) discards it and starts over once.
+     * [onProgress] gets (bytes so far, total or 0). The caller verifies the SHA-256.
+     */
+    fun downloadMapPack(site: String, token: String, pack: String, dest: File, onProgress: (Long, Long) -> Unit) {
+        for (attempt in 0..1) {
+            val have = if (dest.isFile) dest.length() else 0L
+            val conn = try {
+                URL("$site/api/method/etracker.devices.download_map_pack").openConnection() as HttpURLConnection
+            } catch (e: Exception) {
+                throw ApiException(0, "Bad server address")
+            }
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 30_000
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                if (have > 0) conn.setRequestProperty("Range", "bytes=$have-")
+                conn.outputStream.use { it.write(JSONObject().put("token", token).put("pack", pack).toString().toByteArray(Charsets.UTF_8)) }
+                val status = conn.responseCode
+                if (status == 416 && attempt == 0) {
+                    dest.delete()
+                    continue
+                }
+                if (status !in 200..299) {
+                    val text = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    throw ApiException(status, serverMessage(text) ?: "HTTP $status")
+                }
+                val append = status == 206 && have > 0
+                var done = if (append) have else 0L
+                val total = conn.contentLengthLong.takeIf { it > 0 }?.let { it + done } ?: 0L
+                var lastReport = 0L
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(dest, append).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            val now = System.currentTimeMillis()
+                            if (now - lastReport > 250) { lastReport = now; onProgress(done, total) }
+                        }
+                    }
+                }
+                onProgress(done, total)
+                return
+            } catch (e: IOException) {
+                throw ApiException(0, e.message ?: "Network error")
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
+
+    /**
      * The read-only situation picture for this device's operation (plan, live
      * units, watch log, optionally threat). Pass back the `modified` values of
      * the plan / IPB you already hold: an unchanged part comes back as a stub
      * (`{"unchanged": true}`) so frequent polling stays cheap.
      */
-    fun getSituation(site: String, token: String, planModified: String?, ipbModified: String?): JSONObject {
+    fun getSituation(site: String, token: String, planModified: String?, ipbModified: String?, packs: String? = null): JSONObject {
         val body = JSONObject().put("token", token)
         planModified?.let { body.put("plan_modified", it) }
         ipbModified?.let { body.put("ipb_modified", it) }
+        // the offline map packs this phone holds ("id:sha256,…"; "" = none), for the Devices page
+        packs?.let { body.put("packs", it) }
         return call(site, "etracker.devices.get_situation", body)
     }
 
