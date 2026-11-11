@@ -38,9 +38,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /** How often the picture is refreshed while the Situation tab is open. */
 private const val POLL_MS = 10_000L
@@ -167,6 +164,8 @@ class SituationWeb(private val context: Context) {
         js("Situation.setTheme('${mode.js}')")
     }
     fun setStatus(text: String, level: String) = js("Situation.setStatus(${JSONObject.quote(text)},'$level')")
+    /** When the picture shown was fetched (this phone's clock): the page shows NOT LIVE once it is old. */
+    fun setFreshness(ms: Long) = js("Situation.setFreshness($ms)")
 
     /** Detach from any previous parent so Compose can host it again after a tab switch. */
     fun attach(): WebView {
@@ -204,6 +203,7 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
         var last: JSONObject? = SituationCache.load(ctx)
         last?.let {
             web.setData(it.toString())
+            web.setFreshness(SituationCache.fileTime(ctx))
             web.setStatus("Showing saved data…", "warn")
         }
         while (isActive) {
@@ -226,6 +226,7 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                 last = merged
                 withContext(Dispatchers.IO) { SituationCache.save(ctx, merged) }
                 web.setData(merged.toString())
+                web.setFreshness(System.currentTimeMillis())
                 web.setStatus("", "ok")
             } catch (e: Api.ApiException) {
                 if (e.authFailure) {
@@ -233,8 +234,8 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                     DeviceReset.signOut(ctx)
                     break
                 }
-                val saved = last?.let { "Offline — showing data from ${clock(SituationCache.fileTime(ctx))}" }
-                web.setStatus(saved ?: "Offline — can't reach the server", "warn")
+                // the page's NOT LIVE banner says how old the saved picture is
+                web.setStatus(if (last != null) "Offline — showing the last picture received" else "Offline — can't reach the server", "warn")
             }
             delay(POLL_MS)
         }
@@ -243,5 +244,3 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
     AndroidView(factory = { web.attach() }, modifier = Modifier.fillMaxSize())
 }
 
-private fun clock(ms: Long): String =
-    if (ms <= 0) "earlier" else SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ms))
