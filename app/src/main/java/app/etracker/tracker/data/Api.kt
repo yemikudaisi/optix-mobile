@@ -103,8 +103,15 @@ object Api {
         )
     }
 
-    /** What a position post tells us: the suggested interval (0 = none) and whether the server wants this device wiped. */
-    class Pulse(val intervalSeconds: Int, val wipe: Boolean)
+    /**
+     * What a position post tells us: the suggested interval (0 = none), whether the server wants this
+     * device wiped, and the whole reply ([raw]), which also carries the field state (`sos`,
+     * `sosAlerts`, `checkin`; see [getFieldState]).
+     */
+    class Pulse(val intervalSeconds: Int, val wipe: Boolean, val raw: JSONObject = JSONObject()) {
+        /** The interval is the SOS one (this phone's SOS is in its fast-reporting burst), not the normal one. */
+        val sosBurst: Boolean get() = raw.optJSONObject("sos")?.let { !it.isNull("intervalS") && it.optInt("intervalS", 0) > 0 } ?: false
+    }
 
     /** A newer app version offered by the server. */
     class AppUpdate(
@@ -136,7 +143,16 @@ object Api {
             )
         }
         val m = call(site, "etracker.devices.post_positions", JSONObject().put("token", token).put("positions", arr).put("app_version", app.etracker.tracker.BuildConfig.VERSION_CODE))
-        return Pulse(m.optInt("interval_s", 0), m.optBoolean("wipe", false))
+        return Pulse(m.optInt("interval_s", 0), m.optBoolean("wipe", false), m)
+    }
+
+    /**
+     * The service's light poll when it has no fixes to send: {ok, interval_s, sos, sosAlerts,
+     * checkin, serverTime, wipe} (the same field state post_positions returns).
+     */
+    fun getFieldState(site: String, token: String): Pulse {
+        val m = call(site, "etracker.devices.get_field_state", JSONObject().put("token", token))
+        return Pulse(m.optInt("interval_s", 0), m.optBoolean("wipe", false), m)
     }
 
     /** Asks whether a newer app exists than [versionCode]. Also works as a heartbeat (carries the wipe flag). */

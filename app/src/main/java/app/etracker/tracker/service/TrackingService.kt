@@ -20,6 +20,9 @@ import app.etracker.tracker.MainActivity
 import app.etracker.tracker.R
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
+import app.etracker.tracker.data.FieldOutbox
+import app.etracker.tracker.data.FieldState
+import app.etracker.tracker.data.FieldUi
 import app.etracker.tracker.data.Fix
 import app.etracker.tracker.data.FixQueue
 import app.etracker.tracker.data.Session
@@ -49,6 +52,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * server accepted. Offline or server errors just leave the queue to grow and
  * retry with backoff. If the server says the token is no longer valid (device
  * revoked) the service stops and the app returns to onboarding.
+ *
+ * SOS and check-in ride on the same service: the flusher sends the [FieldOutbox]
+ * (SOS first) before any fixes, every reply's field state goes into [FieldState],
+ * and while this phone's SOS is in its burst the fix interval drops to the SOS
+ * interval (the location request is rebuilt whenever the effective interval
+ * changes). With no fixes going out it polls get_field_state, so a commander's
+ * phone in a pocket still hears of a subordinate's SOS and a check-in falling due.
  */
 class TrackingService : Service() {
 
@@ -59,6 +69,15 @@ class TrackingService : Service() {
     private val flushSignal = Channel<Unit>(Channel.CONFLATED)
     private var callback: LocationCallback? = null
 
+    /** The interval the current location request was built with (main thread). */
+    private var requestedIntervalS = 0
+
+    /** Last time the server heard from us with a reply carrying the field state (positions or a poll). */
+    @Volatile private var lastContactMs = 0L
+
+    /** Last foreground notification shown, so it is only re-posted when it changes. */
+    private var shownNotice: Pair<String, String>? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -67,6 +86,8 @@ class TrackingService : Service() {
         queue = FixQueue.get(applicationContext)
         fused = LocationServices.getFusedLocationProviderClient(this)
         createChannel()
+        FieldNotifier.createChannels(applicationContext)
+        FieldOutbox.start(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -79,6 +100,8 @@ class TrackingService : Service() {
         if (callback == null) {
             beginLocationUpdates()
             startFlusher()
+            startFieldWatch()
+            startFieldPoll()
             TrackerState.update { copy(running = true, status = "Waiting for GPS…", revoked = false, queued = queue.count()) }
         }
         return START_STICKY
@@ -92,14 +115,18 @@ class TrackingService : Service() {
         super.onDestroy()
     }
 
+    // ---- interval -------------------------------------------------------
+
+    /**
+     * The interval to report at now: the SOS interval while this phone's SOS is in its burst
+     * (locally from the moment it was raised, or as the server says), else the normal one.
+     */
+    private fun effectiveIntervalS(ui: FieldUi = FieldState.value): Int =
+        if (ui.burst()) minOf(ui.burstIntervalS, session.intervalSeconds) else session.intervalSeconds
+
     // ---- location -------------------------------------------------------
 
-    @SuppressLint("MissingPermission") // checked in onStartCommand
     private fun beginLocationUpdates() {
-        val intervalMs = session.intervalSeconds * 1000L
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
-            .setMinUpdateIntervalMillis(intervalMs / 2)
-            .build()
         val cb = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
                 if (DeviceReset.active) return // wipe in progress: record nothing
@@ -128,12 +155,98 @@ class TrackingService : Service() {
             }
         }
         callback = cb
+        requestUpdates(effectiveIntervalS())
+    }
+
+    /** (Re)builds the location request for [intervalS]; the same callback keeps receiving. Main thread. */
+    @SuppressLint("MissingPermission") // checked in onStartCommand
+    private fun requestUpdates(intervalS: Int) {
+        val cb = callback ?: return
+        if (requestedIntervalS != 0) fused.removeLocationUpdates(cb)
+        requestedIntervalS = intervalS
+        val intervalMs = intervalS * 1000L
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
+            .setMinUpdateIntervalMillis(intervalMs / 2)
+            .build()
         fused.requestLocationUpdates(request, cb, Looper.getMainLooper())
     }
 
-    private fun hasLocationPermission() =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    private fun hasLocationPermission() = hasLocationPermission(this)
+
+    // ---- SOS / check-in -------------------------------------------------
+
+    /**
+     * Follows [FieldState] (and the clock, for the end of the local burst): rebuilds the location
+     * request when the effective interval changes and keeps the foreground notification current.
+     */
+    private fun startFieldWatch() {
+        scope.launch(Dispatchers.Main) {
+            FieldState.flow.collect { onField(it) }
+        }
+        scope.launch(Dispatchers.Main) {
+            while (isActive) {
+                delay(5_000)
+                onField(FieldState.value)
+            }
+        }
+    }
+
+    private fun onField(ui: FieldUi) {
+        if (callback == null || DeviceReset.active) return
+        val iv = effectiveIntervalS(ui)
+        if (iv != requestedIntervalS) {
+            requestUpdates(iv)
+            flushSignal.trySend(Unit) // the flusher's wait follows the new interval
+        }
+        val n = notice(ui)
+        if (n != shownNotice) {
+            shownNotice = n
+            runCatching { getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(n)) }
+        }
+    }
+
+    /**
+     * get_field_state when nothing else has reached the server lately: every 60 s, every 15 s
+     * while this phone's SOS is open (to show the acknowledgement promptly).
+     */
+    private fun startFieldPoll() {
+        scope.launch {
+            var lastPoll = 0L
+            while (isActive && !DeviceReset.active) {
+                delay(5_000)
+                val period = if (FieldState.value.sosActive) 15_000L else 60_000L
+                val now = System.currentTimeMillis()
+                if (now - lastContactMs < period || now - lastPoll < period) continue
+                lastPoll = now
+                val site = session.site ?: continue
+                val token = session.token ?: continue
+                val gen = FieldState.generation()
+                try {
+                    val p = Api.getFieldState(site, token)
+                    if (p.wipe) {
+                        DeviceReset.wipe(applicationContext)
+                        break
+                    }
+                    lastContactMs = System.currentTimeMillis()
+                    FieldState.applyServer(applicationContext, p.raw, gen)
+                    noteInterval(p)
+                } catch (e: Api.ApiException) {
+                    if (e.status == 401) {
+                        DeviceReset.signOut(applicationContext)
+                        break
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** Honour the server's suggested normal interval; the SOS interval is never stored as the normal one. */
+    private fun noteInterval(p: Api.Pulse) {
+        val suggested = p.intervalSeconds
+        if (p.sosBurst) return
+        if (suggested in 5..3600 && suggested != session.intervalSeconds) session.updateInterval(suggested)
+    }
 
     // ---- delivery -------------------------------------------------------
 
@@ -142,15 +255,19 @@ class TrackingService : Service() {
             var failures = 0
             while (isActive && !DeviceReset.active) {
                 // wake on a new fix, or at least once per reporting interval
-                withTimeoutOrNull(session.intervalSeconds * 1000L) { flushSignal.receive() }
+                withTimeoutOrNull(effectiveIntervalS() * 1000L) { flushSignal.receive() }
                 if (DeviceReset.active) break
+                // SOS / check-in first: they must never wait behind a position backlog
+                FieldOutbox.sendIfIdle(applicationContext)
                 // heartbeat + update check (throttled): lets the server reach us even when no fixes are flowing
                 Updater.check(applicationContext)
                 if (flushOnce()) {
                     failures = 0
                 } else {
                     failures++
-                    delay(minOf(300_000L, 5_000L shl minOf(failures, 6))) // 10s .. 5min
+                    // during an SOS keep trying at least every 10 s
+                    val cap = if (FieldState.value.burst()) 10_000L else 300_000L
+                    delay(minOf(cap, 5_000L shl minOf(failures, 6))) // 10s .. 5min
                 }
             }
         }
@@ -167,15 +284,17 @@ class TrackingService : Service() {
                 return true
             }
             try {
+                val gen = FieldState.generation()
                 val pulse = Api.postPositions(site, token, batch.map { it.fix })
-                val suggested = pulse.intervalSeconds
                 if (pulse.wipe) {
                     // the server wants this device wiped: erase everything (the queue included) and stop
                     DeviceReset.wipe(applicationContext)
                     return true
                 }
                 queue.delete(batch.map { it.id })
-                if (suggested in 5..3600 && suggested != session.intervalSeconds) session.updateInterval(suggested)
+                lastContactMs = System.currentTimeMillis()
+                FieldState.applyServer(applicationContext, pulse.raw, gen)
+                noteInterval(pulse)
                 TrackerState.update {
                     copy(status = "Reporting", lastSentMs = System.currentTimeMillis(), queued = queue.count())
                 }
@@ -208,25 +327,45 @@ class TrackingService : Service() {
         )
     }
 
-    private fun notification(): Notification {
+    /** Title and text of the ongoing notification: the SOS state when there is one, else plain reporting. */
+    private fun notice(ui: FieldUi): Pair<String, String> {
+        val sos = ui.sos
+        val unit = session.unit.ifBlank { session.label }
+        return when {
+            sos != null && sos.open -> {
+                val ack = if (sos.ackBy != null) "ACKNOWLEDGED by ${sos.ackBy}" else "NOT ACKNOWLEDGED"
+                val burst = if (ui.burst()) " · reporting every ${effectiveIntervalS(ui)} s" else ""
+                "SOS ACTIVE" to "Sent ${sos.dtg} · $ack$burst"
+            }
+            ui.sosQueued -> "SOS QUEUED — sending when there is signal" to "Reporting every ${effectiveIntervalS(ui)} s · $unit"
+            else -> "Reporting position" to unit
+        }
+    }
+
+    private fun notification(n: Pair<String, String> = notice(FieldState.value)): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        val sos = n.first != "Reporting position"
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Reporting position")
-            .setContentText(session.unit.ifBlank { session.label })
+            .setContentTitle(n.first)
+            .setContentText(n.second)
+            .apply { if (sos) setColor(0xFFB91C1C.toInt()).setColorized(true) }
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(open)
             .build()
     }
 
     private fun startForegroundCompat() {
+        val n = notice(FieldState.value)
+        shownNotice = n
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            startForeground(NOTIFICATION_ID, notification(n), ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
-            startForeground(NOTIFICATION_ID, notification())
+            startForeground(NOTIFICATION_ID, notification(n))
         }
     }
 
@@ -235,8 +374,22 @@ class TrackingService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val BATCH = 200 // server limit per call
 
+        fun hasLocationPermission(ctx: Context) =
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, TrackingService::class.java))
+        }
+
+        /**
+         * Starts reporting if location is permitted (an SOS starts it even if the holder had stopped
+         * it). Without the permission nothing starts: the SOS still goes through the outbox, with the
+         * last known position or none. Never throws (a background start may be refused by Android).
+         */
+        fun startIfPermitted(context: Context) {
+            if (!hasLocationPermission(context) || DeviceReset.active || TrackerState.flow.value.running) return
+            runCatching { start(context) }
         }
 
         fun stop(context: Context) {

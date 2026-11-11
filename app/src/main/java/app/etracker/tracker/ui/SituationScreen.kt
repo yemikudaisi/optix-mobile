@@ -26,7 +26,12 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewFeature
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
+import app.etracker.tracker.data.FieldOutbox
+import app.etracker.tracker.data.FieldState
 import app.etracker.tracker.data.MapPacks
+import app.etracker.tracker.service.FieldNotifier
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import app.etracker.tracker.data.Updater
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.SituationCache
@@ -66,6 +71,17 @@ class SituationWeb(private val context: Context) {
 
     init {
         configure(context)
+        // reports the page handed to the native outbox (EtrackerNative.enqueue): answer like submit does
+        scope.launch {
+            FieldOutbox.results.collect { r -> reply(r.id, r.ok, r.retry, r.msg, r.json) }
+        }
+        // the native SOS / check-in picture and what still waits in the outbox, whenever it changes
+        scope.launch {
+            FieldState.flow.map { it.pageJson() }.distinctUntilChanged().collect { json ->
+                val code = "Situation.setNativeState && Situation.setNativeState(${JSONObject.quote(json)})"
+                view.post { js(code) }
+            }
+        }
         // the page applies ?theme= before first paint (no flash); the background shows until it renders
         val osDark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         val dark = when (ThemePrefs.mode) { ThemeMode.DARK -> true; ThemeMode.LIGHT -> false; ThemeMode.AUTO -> osDark }
@@ -152,6 +168,19 @@ class SituationWeb(private val context: Context) {
                 }
             }
         }
+
+        /**
+         * Hands a report (an SOS, an SOS cancel, a check-in, …) to the durable native outbox instead of
+         * sending it now: it survives the page and the app closing and goes the moment there is signal,
+         * SOS first. The outcome comes back through Situation.reportResult(id, …) exactly like [submit]
+         * (a retryable first failure once with retry = true, then the final ok / refusal).
+         */
+        @JavascriptInterface
+        fun enqueue(id: String, reportJson: String) {
+            FieldOutbox.enqueue(context, id, reportJson)
+            // raising an SOS on the map buzzes like the Status tab's
+            if (runCatching { JSONObject(reportJson).optString("kind") }.getOrNull() == "sos") FieldNotifier.buzzSent(context)
+        }
     }
 
     private fun reply(id: String, ok: Boolean, retry: Boolean, msg: String, json: String) {
@@ -230,6 +259,7 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
             if (site == null || token == null) break
             web.setConnectivity(Updater.isOnline(ctx))
             try {
+                val gen = FieldState.generation()
                 val next = withContext(Dispatchers.IO) {
                     Api.getSituation(site, token, SituationCache.modified(last, "plan"), SituationCache.modified(last, "ipb"), MapPacks.heldParam(ctx))
                 }
@@ -237,6 +267,11 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                     // server order: erase this app's data now (the wipe also ends this loop)
                     DeviceReset.wipe(ctx)
                     break
+                }
+                // own SOS, the SOS of units below (buzzes once per new alert) and the unit's check-in;
+                // with no situation access the reply's sosAlerts is always empty, so it says nothing then
+                withContext(Dispatchers.IO) {
+                    FieldState.applyServer(ctx, next, gen, alerts = next.optString("access") != "None")
                 }
                 next.optJSONObject("me")?.let {
                     session.updateHolder(it.optString("holderName"), it.optString("appointment", "Other"), it.optBoolean("primary", false), it.optBoolean("unverified", false))
