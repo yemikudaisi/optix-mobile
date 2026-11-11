@@ -207,3 +207,20 @@ optimisation prompt, symbol rendering on the phone (shows the unit name),
 a release signing config, CI. The in-app update and remote-wipe
 flows compile and the server side is tested; see the notes in the project history for
 what has been exercised on an emulator.
+
+## Release signing
+
+Builds published to phones are **release builds** signed with the OPTIX release key. Android only installs an
+update signed with the same key as the installed app, so **losing the key means every phone must uninstall and
+re-enrol**. The first release-signed build (replacing the earlier debug-signed ones) needs that reinstall once.
+
+- The key is kept outside the repo: `~/.optix-signing/optix-release.jks` and `~/.optix-signing/keystore.properties`
+  (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`), or a properties file named by the `OPTIX_SIGNING`
+  environment variable. `*.jks` / `*.keystore` are git-ignored.
+- Back both up in the team's password manager (key file as an attachment, password in the entry). Certificate
+  SHA-256: `08:32:7C:56:EC:4A:97:0A:F8:8A:66:92:7A:C3:A7:19:CC:D4:14:11:1F:A5:8F:82:F5:35:D2:83:E3:61:18:4A`.
+- Build: `source tools/env.sh && ./gradlew :app:assembleRelease` (the first run needs network for the lint
+  check), output `app/build/outputs/apk/release/app-release.apk`. Check with
+  `apksigner verify --print-certs <apk>`.
+- Release builds allow HTTPS only (cleartext is allowed in debug builds for a local dev server).
+- Without the properties file the release build is unsigned and cannot be installed; debug builds are unaffected.
