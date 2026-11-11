@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -16,10 +18,30 @@ android {
         versionName = "0.6.0"
     }
 
+    // Release signing key: kept OUTSIDE the repo (default ~/.optix-signing/keystore.properties, or the
+    // OPTIX_SIGNING env var pointing at a properties file with storeFile, storePassword, keyAlias,
+    // keyPassword). Installed phones only accept updates signed with the same key: back it up.
+    val signingProps = Properties().apply {
+        val f = file(System.getenv("OPTIX_SIGNING") ?: "${System.getProperty("user.home")}/.optix-signing/keystore.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    signingConfigs {
+        if (signingProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = file(signingProps.getProperty("storeFile"))
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
+            // not minified yet: the release build stays byte-for-byte the code the debug builds were tested with
+            isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
