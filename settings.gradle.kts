@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "eTrackerDevice"
+rootProject.name = "OptixField"
 include(":app")

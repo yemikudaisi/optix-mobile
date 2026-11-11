@@ -224,7 +224,7 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
                     code = o.getString("code")
                     next(site, code)
                 } catch (e: Exception) {
-                    error = "That QR code isn't an eTracker enrolment code."
+                    error = "That QR code isn't an OPTIX enrolment code."
                 }
             }
             .addOnFailureListener { error = it.message ?: "Scanning failed or was cancelled." }
@@ -234,7 +234,7 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
         Text("Enrol this device", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Ask your operator for an enrolment code in the eTracker web app (Devices), then scan the QR or type the code. " +
+            "Ask your operator for an enrolment code in the OPTIX web app (Devices), then scan the QR or type the code. " +
                 "Next you will say who is carrying this phone.",
             style = MaterialTheme.typography.bodyMedium,
         )
