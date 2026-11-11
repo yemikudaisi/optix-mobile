@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -32,8 +34,30 @@ data class PackInfo(
     val size: Long,
     val sha256: String,
     val modified: String,
+    /** "sheet" | "overview" | "custom" (an older server sends none: custom). */
+    val kind: String = "custom",
+    /** Map series code, e.g. "NGA-TOPO-100K" (overview: "NGA-TOPO-OVERVIEW"). */
+    val series: String = "",
+    /** Readable series name, e.g. "Nigeria topo 1:100k". */
+    val seriesLabel: String = "",
+    /** Scale denominator (100000 = 1:100k), 0 when not given. */
+    val scale: Long = 0,
+    /** Sheet number, e.g. "193" or "171 NW" (sheets only). */
+    val sheetNo: String = "",
+    /** Sheet name, e.g. "MUTI". */
+    val sheetTitle: String = "",
+    /** The sheet's own extent [w, s, e, n]; empty for non-sheets. */
+    val sheetBounds: List<Double> = emptyList(),
     val raw: JSONObject,
 ) {
+    /** The place this pack fills (one sheet of a series, or a series overview); null for custom packs. */
+    val slot: String? get() = PackSlots.slot(kind, series, sheetNo)
+    val key: PackSlots.Key get() = PackSlots.Key(id, slot)
+
+    /** "193 MUTI" for a sheet, else the title. */
+    val label: String
+        get() = if (kind == "sheet" && sheetNo.isNotBlank()) listOf(sheetNo, sheetTitle).filter { it.isNotBlank() }.joinToString(" ") else title
+
     companion object {
         private val ID = Regex("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -42,6 +66,8 @@ data class PackInfo(
             if (!ID.matches(id)) return null
             val b = o.optJSONArray("bounds") ?: return null
             if (b.length() != 4) return null
+            val sb = o.optJSONArray("sheetBounds")
+            val kind = o.optString("kind").lowercase().takeIf { it == "sheet" || it == "overview" } ?: "custom"
             return PackInfo(
                 id = id,
                 title = o.optString("title").ifBlank { id },
@@ -52,6 +78,13 @@ data class PackInfo(
                 size = o.optLong("size", 0),
                 sha256 = o.optString("sha256").lowercase(),
                 modified = o.optString("modified"),
+                kind = kind,
+                series = o.optString("series"),
+                seriesLabel = o.optString("seriesLabel"),
+                scale = o.optLong("scale", 0),
+                sheetNo = o.optString("sheetNo").trim(),
+                sheetTitle = o.optString("sheetTitle").trim(),
+                sheetBounds = if (sb != null && sb.length() == 4) (0 until 4).map { sb.optDouble(it) } else emptyList(),
                 raw = o,
             )
         }
@@ -69,17 +102,30 @@ data class PackRow(
     /** Bytes so far / total while downloading, else null. */
     val progress: Pair<Long, Long>? = null,
     val error: String? = null,
-)
+    /** An older version of the same sheet/overview still on the phone (and on the map) until this one is in. */
+    val replaces: PackInfo? = null,
+    /** Installed as a newer version of its sheet in the last 7 days. */
+    val recentlyUpdated: Boolean = false,
+    /** Queued behind other downloads. */
+    val waiting: Boolean = false,
+) {
+    /** The id of the file on the phone for this line (the pack itself, or the older version it replaces). */
+    val onPhoneId: String? get() = if (installed) info.id else replaces?.id
+}
 
 /**
  * Offline map packs: raster MBTiles files the server publishes for this phone's operation.
  *
  * * The list comes with every situation poll (`mapPacks`); packs the server no longer offers
- *   (withdrawn, superseded, another operation) are deleted from the phone.
+ *   (withdrawn, another operation) are deleted from the phone. Packs are made per map sheet
+ *   (plus an overview per series, and custom packs): when a sheet is re-issued the server offers
+ *   a new id for the same sheet, and the old file stays (and is drawn) until the new one has
+ *   downloaded and verified, so the map never has a gap (see [PackSlots]).
  * * Downloads go over HTTPS with the device token (POST, token in the body), resume with an
  *   HTTP Range after an interruption, and are kept only when the SHA-256 matches.
- * * Automatic download is off by default; with "Download on Wi-Fi automatically" on, offered
- *   packs are fetched while the phone is on an unmetered network.
+ * * "Download on Wi-Fi automatically" is on by default: offered packs (new sheets and newer
+ *   versions of sheets) are fetched while the phone is on an unmetered network. Two downloads
+ *   run at a time; the rest wait.
  * * Tiles are served to the Situation page from the files (see [serve]); the page asks for
  *   `https://tiles.optix.invalid/<pack>/<z>/<x>/<y>` and the WebView client answers.
  *
@@ -89,11 +135,13 @@ object MapPacks {
     const val TILE_HOST = "tiles.optix.invalid"
     private const val PREFS = "map_packs"
     private const val KEY_AUTO = "auto_wifi"
+    private const val KEY_UPDATED = "updated_slots"
+    private const val UPDATED_FOR_MS = 7L * 24 * 3600 * 1000
     private const val OFFERED = "offered.json"
 
     private val _rows = MutableStateFlow<List<PackRow>>(emptyList())
     val rows: StateFlow<List<PackRow>> = _rows.asStateFlow()
-    private val _autoWifi = MutableStateFlow(false)
+    private val _autoWifi = MutableStateFlow(true)
     val autoWifi: StateFlow<Boolean> = _autoWifi.asStateFlow()
     /** True once the server's list has been seen (on this run or a saved one). */
     private val _known = MutableStateFlow(false)
@@ -107,6 +155,8 @@ object MapPacks {
     private val jobs = ConcurrentHashMap<String, Job>()
     private val progress = ConcurrentHashMap<String, Pair<Long, Long>>()
     private val errors = ConcurrentHashMap<String, String>()
+    private val waiting = ConcurrentHashMap.newKeySet<String>()
+    private val gate = Semaphore(2)
     private val dbs = ConcurrentHashMap<String, SQLiteDatabase>()
     @Volatile private var offered: List<PackInfo>? = null
     @Volatile private var loaded = false
@@ -121,7 +171,7 @@ object MapPacks {
         if (loaded) return
         val ctx = context.applicationContext
         loaded = true
-        _autoWifi.value = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO, false)
+        _autoWifi.value = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO, true)
         offered = runCatching { parse(JSONArray(File(dir(ctx), OFFERED).readText())) }.getOrNull()
         _known.value = offered != null
         publish(ctx)
@@ -145,7 +195,8 @@ object MapPacks {
         installed(context).forEach { p ->
             a.put(
                 JSONObject().put("id", p.id).put("title", p.title).put("bounds", JSONArray(p.bounds))
-                    .put("minZoom", p.minZoom).put("maxZoom", p.maxZoom).put("format", p.format),
+                    .put("minZoom", p.minZoom).put("maxZoom", p.maxZoom).put("format", p.format)
+                    .put("kind", p.kind).put("series", p.series).put("sheetNo", p.sheetNo).put("sheetTitle", p.sheetTitle),
             )
         }
         return a.toString()
@@ -155,7 +206,9 @@ object MapPacks {
 
     /**
      * The server's list (get_situation -> mapPacks). [present] false (an older server, or a
-     * reply without the key) changes nothing. Packs no longer offered are deleted.
+     * reply without the key) changes nothing. Packs no longer offered are deleted, except an
+     * older sheet/overview whose replacement is offered but not downloaded yet: it stays (and is
+     * drawn) until the replacement is in, or for good if the replacement is never fetched.
      */
     fun onServerList(context: Context, list: JSONArray?, present: Boolean) {
         if (!present) return
@@ -166,7 +219,7 @@ object MapPacks {
         _known.value = true
         runCatching { File(dir(ctx), OFFERED).writeText(JSONArray(next.map { it.raw }).toString()) }
         val keep = next.map { it.id }.toSet()
-        installed(ctx).filter { it.id !in keep }.forEach { remove(ctx, it.id) }
+        PackSlots.packsToDelete(installed(ctx).map { it.key }, next.map { it.key }).forEach { remove(ctx, it) }
         jobs.keys.filter { it !in keep }.forEach { jobs.remove(it)?.cancel() }
         publish(ctx)
         if (_autoWifi.value && onUnmetered(ctx)) autoDownload(ctx)
@@ -175,6 +228,15 @@ object MapPacks {
     private fun autoDownload(ctx: Context) {
         val have = installed(ctx).associateBy { it.id }
         offered.orEmpty().filter { have[it.id]?.sha256 != it.sha256 && errors[it.id] == null }.forEach { download(ctx, it.id) }
+    }
+
+    /** Offered sheet and overview packs that are missing or out of date ("Download all for my AO"). */
+    fun neededForAo(rows: List<PackRow>): List<PackRow> =
+        rows.filter { it.offered && it.info.kind != "custom" && (!it.installed || it.needsUpdate) }
+
+    fun downloadAll(context: Context) {
+        val ctx = context.applicationContext
+        neededForAo(_rows.value).forEach { download(ctx, it.info.id) }
     }
 
     fun setAutoWifi(context: Context, on: Boolean) {
@@ -229,9 +291,13 @@ object MapPacks {
         val info = offered?.firstOrNull { it.id == id } ?: return
         if (jobs[id]?.isActive == true) return
         errors.remove(id)
+        waiting.add(id)
         jobs[id] = scope.launch {
             val job = coroutineContext[Job]
             try {
+                publish(ctx)
+                gate.withPermit {
+                waiting.remove(id)
                 val s = Session(ctx)
                 val site = s.site ?: throw IllegalStateException("This device is not enrolled.")
                 val token = s.token ?: throw IllegalStateException("This device is not enrolled.")
@@ -252,11 +318,19 @@ object MapPacks {
                     tmp.delete()
                     throw IllegalStateException("The download failed verification (checksum mismatch) and was discarded. Try again.")
                 }
+                val before = installed(ctx)
                 dbs.remove(id)?.close()
                 val dest = mbtiles(ctx, id)
                 dest.delete()
                 if (!tmp.renameTo(dest)) throw IllegalStateException("Could not store the map.")
                 meta(ctx, id).writeText(info.raw.toString())
+                // the new version is in place: now drop the older version(s) of the same sheet
+                val old = PackSlots.supersededBy(info.key, before.map { it.key }, offered.orEmpty().map { it.key })
+                old.forEach { remove(ctx, it) }
+                val sameIdUpdated = before.any { it.id == id && it.sha256 != info.sha256 }
+                val slot = info.slot
+                if (slot != null && (old.isNotEmpty() || sameIdUpdated)) markUpdated(ctx, slot)
+                }
             } catch (e: Api.ApiException) {
                 if (e.authFailure) DeviceReset.signOut(ctx)
                 errors[id] = if (e.status == 0) "No connection: tap Download to resume." else Api.describe(e)
@@ -265,6 +339,7 @@ object MapPacks {
             } catch (e: Exception) {
                 errors[id] = e.message ?: "Download failed"
             } finally {
+                waiting.remove(id)
                 progress.remove(id)
                 jobs.remove(id)
                 publish(ctx)
@@ -302,21 +377,54 @@ object MapPacks {
         dbs.clear()
         progress.clear()
         errors.clear()
+        waiting.clear()
         offered = null
+        runCatching { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_UPDATED).apply() }
         _known.value = false
         runCatching { dir(ctx).deleteRecursively() }
         _rows.value = emptyList()
     }
 
+    /** Slots updated to a newer version in the last 7 days (shown as "Sheet updated"). */
+    private fun recentSlots(ctx: Context): Set<String> {
+        val o = runCatching {
+            JSONObject(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_UPDATED, null) ?: "{}")
+        }.getOrDefault(JSONObject())
+        val now = System.currentTimeMillis()
+        return o.keys().asSequence().filter { now - o.optLong(it, 0) < UPDATED_FOR_MS }.toSet()
+    }
+
+    @Synchronized
+    private fun markUpdated(ctx: Context, slot: String) {
+        val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val o = runCatching { JSONObject(prefs.getString(KEY_UPDATED, null) ?: "{}") }.getOrDefault(JSONObject())
+        val now = System.currentTimeMillis()
+        o.keys().asSequence().toList().filter { now - o.optLong(it, 0) >= UPDATED_FOR_MS }.forEach { o.remove(it) }
+        o.put(slot, now)
+        prefs.edit().putString(KEY_UPDATED, o.toString()).apply()
+    }
+
     private fun publish(ctx: Context) {
-        val inst = installed(ctx).associateBy { it.id }
+        val list = installed(ctx)
+        val inst = list.associateBy { it.id }
         val off = offered
+        val repl = if (off != null) PackSlots.replacements(list.map { it.key }, off.map { it.key }) else emptyMap()
+        val replacedIds = repl.values.toSet()
+        val recent = recentSlots(ctx)
         val rows = mutableListOf<PackRow>()
         off?.forEach { p ->
             val have = inst[p.id]
-            rows += PackRow(p, offered = true, installed = have != null, needsUpdate = have != null && have.sha256 != p.sha256, progress = progress[p.id], error = errors[p.id])
+            val old = repl[p.id]?.let { inst[it] }
+            rows += PackRow(
+                p, offered = true, installed = have != null,
+                needsUpdate = (have != null && have.sha256 != p.sha256) || old != null,
+                progress = progress[p.id], error = errors[p.id],
+                replaces = old,
+                recentlyUpdated = have != null && p.slot != null && p.slot in recent,
+                waiting = p.id in waiting && progress[p.id] == null,
+            )
         }
-        inst.values.filter { i -> off == null || off.none { it.id == i.id } }.forEach { i ->
+        inst.values.filter { i -> (off == null || off.none { it.id == i.id }) && i.id !in replacedIds }.forEach { i ->
             rows += PackRow(i, offered = false, installed = true, needsUpdate = false)
         }
         _rows.value = rows

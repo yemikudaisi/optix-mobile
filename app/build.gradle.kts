@@ -79,4 +79,7 @@ dependencies {
 
     // encrypted storage for the device token
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // plain JVM unit tests (app/src/test): ./gradlew :app:testDebugUnitTest
+    testImplementation("junit:junit:4.13.2")
 }
