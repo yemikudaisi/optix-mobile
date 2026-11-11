@@ -8,6 +8,7 @@ import android.net.Uri
 import android.webkit.WebResourceResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -157,6 +158,9 @@ object MapPacks {
     private val errors = ConcurrentHashMap<String, String>()
     private val waiting = ConcurrentHashMap.newKeySet<String>()
     private val gate = Semaphore(2)
+    // one writer per pack file: a cancelled download may still be inside a blocking read when a new
+    // one for the same pack starts, and both would append to the same partial file
+    private val fileLocks = ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
     private val dbs = ConcurrentHashMap<String, SQLiteDatabase>()
     @Volatile private var offered: List<PackInfo>? = null
     @Volatile private var loaded = false
@@ -289,6 +293,7 @@ object MapPacks {
     fun download(context: Context, id: String) {
         val ctx = context.applicationContext
         val info = offered?.firstOrNull { it.id == id } ?: return
+        synchronized(jobs) {
         if (jobs[id]?.isActive == true) return
         errors.remove(id)
         waiting.add(id)
@@ -297,6 +302,7 @@ object MapPacks {
             try {
                 publish(ctx)
                 gate.withPermit {
+                fileLocks.getOrPut(id) { kotlinx.coroutines.sync.Mutex() }.withLock {
                 waiting.remove(id)
                 val s = Session(ctx)
                 val site = s.site ?: throw IllegalStateException("This device is not enrolled.")
@@ -331,6 +337,7 @@ object MapPacks {
                 val slot = info.slot
                 if (slot != null && (old.isNotEmpty() || sameIdUpdated)) markUpdated(ctx, slot)
                 }
+                }
             } catch (e: Api.ApiException) {
                 if (e.authFailure) DeviceReset.signOut(ctx)
                 errors[id] = if (e.status == 0) "No connection: tap Download to resume." else Api.describe(e)
@@ -339,11 +346,14 @@ object MapPacks {
             } catch (e: Exception) {
                 errors[id] = e.message ?: "Download failed"
             } finally {
-                waiting.remove(id)
-                progress.remove(id)
-                jobs.remove(id)
+                // only this job's entry: a newer download of the same pack may already be registered
+                if (job != null && jobs.remove(id, job)) {
+                    waiting.remove(id)
+                    progress.remove(id)
+                }
                 publish(ctx)
             }
+        }
         }
     }
 

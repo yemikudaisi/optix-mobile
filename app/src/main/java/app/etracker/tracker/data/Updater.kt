@@ -186,14 +186,28 @@ object Updater {
 
     private fun dir(app: Context) = File(app.cacheDir, "updates").apply { mkdirs() }
 
-    private fun download(app: Context, info: Api.AppUpdate) {
+    private fun download(app: Context, requested: Api.AppUpdate) {
         val session = Session(app)
         val site = session.site
         val token = session.token
         if (site == null || token == null) {
-            _phase.value = UpdatePhase.Failed(info, "This device is not enrolled.")
+            _phase.value = UpdatePhase.Failed(requested, "This device is not enrolled.")
             return
         }
+        // the offer may be stale (a newer version published since the check): ask again right before
+        // downloading, and download exactly the version whose checksum we hold
+        val info = try {
+            Api.getAppUpdate(site, token, BuildConfig.VERSION_CODE).update ?: run {
+                _phase.value = UpdatePhase.Idle
+                return
+            }
+        } catch (e: Api.ApiException) {
+            if (e.authFailure) { DeviceReset.signOut(app); return }
+            requested
+        } catch (_: Exception) {
+            requested
+        }
+        if (info.versionCode != requested.versionCode) _phase.value = UpdatePhase.Available(info)
         val dest = File(dir(app), "optix-${info.versionCode}.apk")
         try {
             // a previous, verified download of this version can be reused
@@ -204,12 +218,12 @@ object Updater {
             dest.delete()
             val part = File(dir(app), "optix-${info.versionCode}.apk.part")
             _phase.value = UpdatePhase.Downloading(info, 0, info.size)
-            val sha = Api.downloadApp(site, token, part, info.size) { done, total ->
+            val sha = Api.downloadApp(site, token, part, info.size, info.versionCode) { done, total ->
                 _phase.value = UpdatePhase.Downloading(info, done, total)
             }
             if (!sha.equals(info.sha256, ignoreCase = true)) {
                 part.delete()
-                _phase.value = UpdatePhase.Failed(info, "The downloaded file failed verification (checksum mismatch). It was discarded; try again.")
+                _phase.value = UpdatePhase.Failed(info, "The downloaded file failed verification (checksum mismatch). It was discarded; tap Check for updates, then try again.")
                 return
             }
             if (!part.renameTo(dest)) {
@@ -265,7 +279,7 @@ object Updater {
                         // key rotation: the new APK may carry the installed key in its history
                         (installed.apkContentsSigners.isNotEmpty() && offered.signingCertificateHistory
                             ?.any { s -> s.toByteArray().contentHashCode() in a } == true)
-                    if (!overlap) return "This update is signed with a different key than the installed app, so Android will refuse it. Ask your administrator to publish a build signed with the same key."
+                    if (!overlap) return "This update is signed with a different key than the installed app, so Android cannot install it over this one. Uninstall this app, install the new version (ask your administrator for the file), then enrol again. This is needed only once."
                 }
             }
             null
