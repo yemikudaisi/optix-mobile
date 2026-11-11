@@ -50,6 +50,9 @@ object Api {
         val verified: Boolean,
         /** Why this number cannot be used (already active on another device), or null. */
         val blocked: String?,
+        /** PIN need for a rostered number: none | set | first (choose one) | unavailable | locked. */
+        val pin: String = "none",
+        val lockMinutes: Int = 0,
     )
 
     /** Checks the code (without using it up) and looks the personnel number up in the roster. */
@@ -66,14 +69,18 @@ object Api {
             matchRank = match?.optString("rank")?.takeIf { it.isNotBlank() },
             verified = match != null && match.optString("source") == "roster" && !match.optBoolean("unverified", false),
             blocked = m.optString("blocked").takeIf { it.isNotBlank() && it != "null" },
+            pin = m.optString("pin", "none").ifBlank { "none" },
+            lockMinutes = m.optInt("lockMinutes", 0),
         )
     }
 
-    fun enrol(siteInput: String, code: String, personnelNumber: String = "", holderName: String = "", appointment: String = ""): Enrolment {
+    fun enrol(siteInput: String, code: String, personnelNumber: String = "", holderName: String = "", appointment: String = "", pin: String = ""): Enrolment {
         val site = normalizeSite(siteInput)
         val body = JSONObject().put("code", code.trim())
         if (personnelNumber.isNotBlank()) {
             body.put("personnel_number", personnelNumber.trim()).put("holder_name", holderName.trim()).put("appointment", appointment)
+            // always sent (even empty) so the server can tell this build from one that cannot send a PIN; POST body only
+            body.put("pin", pin)
         }
         val m = call(site, "etracker.devices.enrol_device", body)
         val h = m.optJSONObject("holder")
