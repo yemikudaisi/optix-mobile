@@ -20,7 +20,7 @@ data class Fix(
 )
 
 /**
- * Client for the eTracker device API (see docs/DEVICE_API.md in the server
+ * Client for the OPTIX device API (see docs/DEVICE_API.md in the server
  * repo). Every call is a POST; the device authenticates with a one-time
  * enrolment code, then a bearer token. Uses only the platform HTTP stack.
  */

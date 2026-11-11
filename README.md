@@ -1,12 +1,16 @@
-# eTracker Device (Android)
+# OPTIX Field (Android)
 
-Companion app for the eTracker server. A phone **enrols** with a one-time code
+The field app for the OPTIX server (formerly "eTracker Device"). The Android
+package ID stays `app.etracker.tracker` so installed phones keep self-updating;
+changing it would make Android treat it as a new app (uninstall and re-enrol).
+
+ A phone **enrols** with a one-time code
 from the web app, then **reports its GPS position**, which the server draws on
 the Situation Map with the unit's symbol (alongside the plan, IPB, watch log and
 the other live devices).
 
 Native Kotlin + Jetpack Compose. Server contract: `docs/DEVICE_API.md` in the
-eTracker server repo (summarised below).
+OPTIX server repo (yemikudaisi/etracker) (summarised below).
 
 ## What it does
 
