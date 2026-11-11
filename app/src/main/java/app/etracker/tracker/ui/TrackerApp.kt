@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,6 +43,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -127,23 +130,72 @@ fun TrackerApp() {
 
 // ---------------------------------------------------------------- onboarding
 
+private val APPOINTMENTS = listOf("Commander", "Deputy", "Signaller", "Other")
+
 @Composable
 private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean, onEnrolled: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val last = remember { session.lastHolder }
     var site by remember { mutableStateOf(session.lastSite ?: "https://") }
     var code by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    fun enrol(s: String, c: String) {
+    // step 0: server and enrolment code; step 1: who is carrying this phone
+    var step by remember { mutableStateOf(0) }
+    var unit by remember { mutableStateOf("") }
+    var pn by remember { mutableStateOf(last?.personnelNumber ?: "") }
+    var name by remember { mutableStateOf(last?.name ?: "") }
+    var appointment by remember { mutableStateOf(last?.appointment ?: "") }
+    var lookup by remember { mutableStateOf<Api.Lookup?>(null) }
+
+    /** Checks the code (not used up) and moves on to the holder form. */
+    fun next(s: String, c: String) {
         scope.launch {
             busy = true
             error = null
             try {
                 val site0 = Api.normalizeSite(s)
-                val e = withContext(Dispatchers.IO) { Api.enrol(site0, c) }
-                session.save(site0, e)
+                val l = withContext(Dispatchers.IO) { Api.enrolLookup(site0, c, pn) }
+                site = site0
+                unit = l.unit
+                lookup = l
+                if (l.matchName != null) { name = l.matchName; l.matchAppointment?.let { appointment = it } }
+                step = 1
+            } catch (ex: Exception) {
+                error = Api.describe(ex)
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    /** Looks the personnel number up in the roster to pre-fill the name and appointment. */
+    fun findNumber() {
+        if (pn.isBlank()) return
+        scope.launch {
+            busy = true
+            error = null
+            try {
+                val l = withContext(Dispatchers.IO) { Api.enrolLookup(site, code, pn) }
+                lookup = l
+                if (l.matchName != null) { name = l.matchName; l.matchAppointment?.let { appointment = it } }
+            } catch (ex: Exception) {
+                error = Api.describe(ex)
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun enrol() {
+        scope.launch {
+            busy = true
+            error = null
+            try {
+                val e = withContext(Dispatchers.IO) { Api.enrol(site, code, pn, name, appointment) }
+                session.save(site, e)
                 onEnrolled()
             } catch (ex: Exception) {
                 error = Api.describe(ex)
@@ -163,7 +215,7 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
                     val o = JSONObject(barcode.rawValue ?: "")
                     site = o.getString("site")
                     code = o.getString("code")
-                    enrol(site, code)
+                    next(site, code)
                 } catch (e: Exception) {
                     error = "That QR code isn't an eTracker enrolment code."
                 }
@@ -171,44 +223,110 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
             .addOnFailureListener { error = it.message ?: "Scanning failed or was cancelled." }
     }
 
-    Text("Enrol this device", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(4.dp))
-    Text(
-        "Ask your operator for an enrolment code in the eTracker web app (Devices), then scan the QR or type the code.",
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    if (wiped) {
-        Spacer(Modifier.height(12.dp))
-        Text("This device was reset by an administrator.", color = MaterialTheme.colorScheme.error)
-    } else if (revoked) {
-        Spacer(Modifier.height(12.dp))
+    if (step == 0) {
+        Text("Enrol this device", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
         Text(
-            "This device was revoked by the server. Ask for a new enrolment code.",
-            color = MaterialTheme.colorScheme.error,
+            "Ask your operator for an enrolment code in the eTracker web app (Devices), then scan the QR or type the code. " +
+                "Next you will say who is carrying this phone.",
+            style = MaterialTheme.typography.bodyMedium,
         )
-    }
-    Spacer(Modifier.height(20.dp))
+        if (wiped) {
+            Spacer(Modifier.height(12.dp))
+            Text("This device was reset by an administrator.", color = MaterialTheme.colorScheme.error)
+        } else if (revoked) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "This device was revoked by the server. Ask for a new enrolment code.",
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        Spacer(Modifier.height(20.dp))
 
-    OutlinedButton(onClick = ::scan, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Scan QR code") }
-    Spacer(Modifier.height(16.dp))
-    Text("or enter it manually", style = MaterialTheme.typography.labelMedium)
-    Spacer(Modifier.height(8.dp))
-    OutlinedTextField(
-        value = site, onValueChange = { site = it }, label = { Text("Server") }, singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(8.dp))
-    OutlinedTextField(
-        value = code, onValueChange = { code = it.uppercase() }, label = { Text("Enrolment code") }, singleLine = true,
-        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(16.dp))
-    Button(
-        onClick = { enrol(site, code) },
-        enabled = !busy && code.isNotBlank() && site.length > 8,
-        modifier = Modifier.fillMaxWidth(),
-    ) { Text(if (busy) "Enrolling…" else "Enrol") }
+        OutlinedButton(onClick = ::scan, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Scan QR code") }
+        Spacer(Modifier.height(16.dp))
+        Text("or enter it manually", style = MaterialTheme.typography.labelMedium)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = site, onValueChange = { site = it }, label = { Text("Server") }, singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = code, onValueChange = { code = it.uppercase() }, label = { Text("Enrolment code") }, singleLine = true,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { next(site, code) },
+            enabled = !busy && code.isNotBlank() && site.length > 8,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (busy) "Checking…" else "Next") }
+    } else {
+        val verified = lookup?.verified == true
+        val blocked = lookup?.blocked
+        Text("Who is carrying this phone?", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "This phone will report for $unit. Reports, acknowledgements and orders are stamped with your personnel number, name and appointment.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(
+            value = pn, onValueChange = { pn = it.uppercase().filter { c -> !c.isWhitespace() }; lookup = null }, label = { Text("Personnel number") },
+            singleLine = true, enabled = !busy,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(4.dp))
+        TextButton(onClick = ::findNumber, enabled = !busy && pn.isNotBlank()) { Text("Look me up") }
+        lookup?.let {
+            Text(
+                when {
+                    verified -> "Found in the roster${it.matchRank?.let { r -> " ($r)" } ?: ""}. Name and appointment are filled in."
+                    it.matchName != null -> "Used before on this server. Check the details below."
+                    pn.isNotBlank() -> "Not in the roster. You can still enrol; you will show as unverified until an administrator confirms you."
+                    else -> ""
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (verified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        blocked?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true,
+            enabled = !busy && !verified, modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+        Text("Appointment", style = MaterialTheme.typography.labelLarge)
+        val locked = verified && lookup?.matchAppointment != null
+        APPOINTMENTS.forEach { a ->
+            Row(
+                Modifier.fillMaxWidth().clickable(enabled = !busy && !locked) { appointment = a }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = appointment == a, onClick = { if (!locked) appointment = a }, enabled = !busy && !locked)
+                Text(a, style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+        Text(
+            "Commander and Deputy can issue orders and respond to reports from the phone.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = ::enrol,
+            enabled = !busy && pn.isNotBlank() && name.isNotBlank() && appointment.isNotBlank() && blocked == null,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (busy) "Enrolling…" else "Enrol") }
+        TextButton(onClick = { step = 0; error = null; lookup = null }, enabled = !busy) { Text("Back") }
+    }
     error?.let {
         Spacer(Modifier.height(12.dp))
         Text(it, color = MaterialTheme.colorScheme.error)
@@ -241,8 +359,31 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
         permissions.launch(wanted.toTypedArray())
     }
 
+    // the appointment can change on the server (an administrator edits it): follow it
+    var holder by remember { mutableStateOf(session.holder) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            holder = session.holder
+            delay(3000)
+        }
+    }
     Text(session.unit.ifBlank { session.label }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
     Text("${session.label} · ${session.device}", style = MaterialTheme.typography.bodyMedium)
+    holder?.let { h ->
+        Spacer(Modifier.height(12.dp))
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Holder", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(h.name.ifBlank { "—" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Row { Label("Appointment"); Text(h.appointment, fontWeight = FontWeight.Medium) }
+                Row { Label("Personnel no."); Mono(h.personnelNumber) }
+                Row { Label("Unit"); Text(session.unit.ifBlank { "—" }) }
+                if (h.primary) Text("Primary device: this phone positions the unit on the map.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                if (h.unverified) Text("Not confirmed in the roster yet (unverified).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                if (!h.canCommand) Text("Your commander or deputy issues orders, responds to reports and chalks off tasks.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
     Spacer(Modifier.height(16.dp))
 
     Card(Modifier.fillMaxWidth()) {

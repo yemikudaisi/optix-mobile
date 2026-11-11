@@ -40,10 +40,53 @@ object Api {
         return s
     }
 
-    fun enrol(siteInput: String, code: String): Enrolment {
+    /** What the server knows before enrolling: the unit the code is for and, for a personnel number, the roster hit. */
+    class Lookup(
+        val unit: String,
+        /** Roster (or earlier device) match for the number, null when unknown. */
+        val matchName: String?,
+        val matchAppointment: String?,
+        val matchRank: String?,
+        val verified: Boolean,
+        /** Why this number cannot be used (already active on another device), or null. */
+        val blocked: String?,
+    )
+
+    /** Checks the code (without using it up) and looks the personnel number up in the roster. */
+    fun enrolLookup(siteInput: String, code: String, personnelNumber: String): Lookup {
         val site = normalizeSite(siteInput)
-        val m = call(site, "etracker.devices.enrol_device", JSONObject().put("code", code.trim()))
+        val body = JSONObject().put("code", code.trim())
+        if (personnelNumber.isNotBlank()) body.put("personnel_number", personnelNumber.trim())
+        val m = call(site, "etracker.devices.enrol_lookup", body)
+        val match = m.optJSONObject("match")
+        return Lookup(
+            unit = m.optString("unit"),
+            matchName = match?.optString("name")?.takeIf { it.isNotBlank() },
+            matchAppointment = match?.optString("appointment")?.takeIf { it.isNotBlank() },
+            matchRank = match?.optString("rank")?.takeIf { it.isNotBlank() },
+            verified = match != null && match.optString("source") == "roster" && !match.optBoolean("unverified", false),
+            blocked = m.optString("blocked").takeIf { it.isNotBlank() && it != "null" },
+        )
+    }
+
+    fun enrol(siteInput: String, code: String, personnelNumber: String = "", holderName: String = "", appointment: String = ""): Enrolment {
+        val site = normalizeSite(siteInput)
+        val body = JSONObject().put("code", code.trim())
+        if (personnelNumber.isNotBlank()) {
+            body.put("personnel_number", personnelNumber.trim()).put("holder_name", holderName.trim()).put("appointment", appointment)
+        }
+        val m = call(site, "etracker.devices.enrol_device", body)
+        val h = m.optJSONObject("holder")
         return Enrolment(
+            holder = h?.let {
+                Holder(
+                    personnelNumber = it.optString("personnelNumber"),
+                    name = it.optString("name"),
+                    appointment = it.optString("appointment", "Other"),
+                    unverified = it.optBoolean("unverified", false),
+                    primary = it.optBoolean("primary", false),
+                )
+            },
             token = m.getString("token"),
             device = m.optString("device"),
             label = m.optString("label"),

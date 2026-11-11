@@ -141,7 +141,8 @@ class SituationWeb(private val context: Context) {
                     if (runCatching { JSONObject(result).optBoolean("wipe", false) }.getOrDefault(false)) DeviceReset.wipe(context)
                 } catch (e: Api.ApiException) {
                     reply(id, false, e.retryable, Api.describe(e), "null")
-                    if (e.authFailure) DeviceReset.signOut(context)
+                    // only an unknown/revoked token (401) ends the enrolment; a 403 is "not allowed to do that"
+                    if (e.status == 401) DeviceReset.signOut(context)
                 } catch (e: Exception) {
                     reply(id, false, true, e.message ?: "Error", "null")
                 }
@@ -217,6 +218,9 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
                     // server order: erase this app's data now (the wipe also ends this loop)
                     DeviceReset.wipe(ctx)
                     break
+                }
+                next.optJSONObject("me")?.let {
+                    session.updateHolder(it.optString("holderName"), it.optString("appointment", "Other"), it.optBoolean("primary", false), it.optBoolean("unverified", false))
                 }
                 val merged = SituationCache.merge(last, next)
                 last = merged
