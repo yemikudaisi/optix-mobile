@@ -3,6 +3,7 @@ package app.etracker.tracker.ui
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -18,7 +19,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewFeature
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.Updater
@@ -63,7 +66,11 @@ class SituationWeb(private val context: Context) {
 
     init {
         configure(context)
-        view.loadUrl("https://appassets.androidplatform.net/assets/situation/situation.html")
+        // the page applies ?theme= before first paint (no flash); the background shows until it renders
+        val osDark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val dark = when (ThemePrefs.mode) { ThemeMode.DARK -> true; ThemeMode.LIGHT -> false; ThemeMode.AUTO -> osDark }
+        view.setBackgroundColor(webBackground(dark))
+        view.loadUrl("https://appassets.androidplatform.net/assets/situation/situation.html?theme=${ThemePrefs.mode.js}")
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -73,6 +80,15 @@ class SituationWeb(private val context: Context) {
             domStorageEnabled = true
             allowFileAccess = false
             allowContentAccess = false
+        }
+        // the page decides its own theme (prefers-color-scheme or the override we pass);
+        // the system must not also darken it algorithmically
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+            WebSettingsCompat.setAlgorithmicDarkeningAllowed(view.settings, false)
+        }
+        @Suppress("DEPRECATION")
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            WebSettingsCompat.setForceDark(view.settings, WebSettingsCompat.FORCE_DARK_OFF)
         }
         // field reports (task status, marked targets) go out through the native client,
         // which owns the device token; the page never sees it
@@ -144,6 +160,11 @@ class SituationWeb(private val context: Context) {
 
     fun setData(json: String) = js("Situation.setData(${JSONObject.quote(json)})")
     fun setSelf(lat: Double, lon: Double, accuracy: Float) = js("Situation.setSelf($lat,$lon,$accuracy)")
+    /** Tell the page the override (auto/light/dark) and match the view background to the effective theme. */
+    fun setTheme(mode: ThemeMode, dark: Boolean) {
+        view.setBackgroundColor(webBackground(dark))
+        js("Situation.setTheme('${mode.js}')")
+    }
     fun setStatus(text: String, level: String) = js("Situation.setStatus(${JSONObject.quote(text)},'$level')")
 
     /** Detach from any previous parent so Compose can host it again after a tab switch. */
@@ -162,6 +183,10 @@ class SituationWeb(private val context: Context) {
 @Composable
 fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
     val ctx = LocalContext.current
+
+    // follow the theme override / OS setting
+    val dark = isDarkNow()
+    LaunchedEffect(ThemePrefs.mode, dark) { web.setTheme(ThemePrefs.mode, dark) }
 
     // the phone's own live fix, drawn as "YOU"
     LaunchedEffect(state.lat, state.lon) {

@@ -41,6 +41,12 @@ object Updater {
     private val _phase = MutableStateFlow<UpdatePhase>(UpdatePhase.Idle)
     val phase: StateFlow<UpdatePhase> = _phase.asStateFlow()
 
+    /** Result of the last manual "Check for updates" tap (null = nothing to say). */
+    private val _note = MutableStateFlow<String?>(null)
+    val note: StateFlow<String?> = _note.asStateFlow()
+    private val _checking = MutableStateFlow(false)
+    val checking: StateFlow<Boolean> = _checking.asStateFlow()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     private var lastCheck = 0L
@@ -94,6 +100,28 @@ object Updater {
             if (e.authFailure) DeviceReset.signOut(app)
             // anything else (offline, server busy): stay quiet, try again later
         } catch (_: Exception) {
+        }
+    }
+
+    /** Manual check from the Status screen: ignores the throttle and snooze, and reports the outcome. */
+    fun checkNow(context: Context) {
+        if (_checking.value) return
+        _checking.value = true
+        _note.value = null
+        scope.launch {
+            try {
+                val app = context.applicationContext
+                if (!isOnline(app)) { _note.value = "No connection."; return@launch }
+                snoozeUntil = 0L
+                check(app, force = true)
+                _note.value = when (val p = _phase.value) {
+                    is UpdatePhase.Idle -> "You're on the latest version."
+                    is UpdatePhase.Failed -> "Update found but the download failed."
+                    else -> "Update available."
+                }
+            } finally {
+                _checking.value = false
+            }
         }
     }
 

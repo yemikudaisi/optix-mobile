@@ -18,6 +18,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.NavigationBar
@@ -271,12 +275,27 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Text(it, color = MaterialTheme.colorScheme.error)
     }
+    Spacer(Modifier.height(16.dp))
+    val checking by Updater.checking.collectAsState()
+    val updateNote by Updater.note.collectAsState()
+    OutlinedButton(onClick = { Updater.checkNow(ctx) }, enabled = !checking, modifier = Modifier.fillMaxWidth()) {
+        Text(if (checking) "Checking…" else "Check for updates")
+    }
+    updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    Text(
+        "Version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
     Spacer(Modifier.height(8.dp))
     Text(
         "Reports every ${session.intervalSeconds} s while running, and keeps a queue when you're offline. " +
             "For best results, exclude this app from battery optimisation.",
         style = MaterialTheme.typography.bodySmall,
     )
+
+    Spacer(Modifier.height(16.dp))
+    ThemeRow()
 
     Spacer(Modifier.height(24.dp))
     TextButton(onClick = { confirmSignOut = true }) { Text("Sign out of this device") }
@@ -299,6 +318,25 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
             },
             dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
         )
+    }
+}
+
+/** Auto / Light / Dark. Auto follows the Android setting; the choice is remembered. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ThemeRow() {
+    val ctx = LocalContext.current
+    Text("Appearance", style = MaterialTheme.typography.labelLarge)
+    Spacer(Modifier.height(4.dp))
+    val modes = ThemeMode.values()
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        modes.forEachIndexed { i, m ->
+            SegmentedButton(
+                selected = ThemePrefs.mode == m,
+                onClick = { ThemePrefs.set(ctx, m) },
+                shape = SegmentedButtonDefaults.itemShape(i, modes.size),
+            ) { Text(m.label) }
+        }
     }
 }
 

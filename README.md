@@ -75,6 +75,18 @@ browser session or an API key, not a device token, and broadcasts site-wide. The
 JS API already takes single updates, so a push channel can be added without
 touching the map.
 
+### Themes
+
+Light and dark. The default follows the Android setting; **Status tab > Appearance**
+(Auto / Light / Dark) overrides it and is remembered (`ui_prefs`, kept across sign-out).
+Compose screens use only `MaterialTheme` colours (`ui/Theme.kt`); the status and
+navigation bars follow the theme. The Situation page takes the choice as `?theme=` at
+load (applied before first paint) and via `Situation.setTheme('auto'|'light'|'dark')`
+afterwards; the WebView background matches the theme and Android's own algorithmic
+darkening is off so the page decides. Page colours are CSS tokens documented at the top
+of `frontend/src/situation/situation.css` (server repo): new CSS must use them. The
+topographic tiles and NATO symbol colours are deliberately the same in both themes.
+
 ## Build
 
 JDK 17 + Android SDK 35 (or Android Studio Ladybug or newer). First run
