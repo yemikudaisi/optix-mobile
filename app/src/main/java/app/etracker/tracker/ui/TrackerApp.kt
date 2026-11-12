@@ -27,6 +27,11 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.MaterialTheme
@@ -80,12 +85,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrackerApp() {
     val ctx = LocalContext.current
     val session = remember { Session(ctx.applicationContext) }
     var enrolled by remember { mutableStateOf(session.enrolled) }
-    var tab by remember { mutableStateOf(0) } // 0 = status, 1 = situation map
+    var tab by remember { mutableStateOf(0) } // 0 = status, 1 = situation map, 2 = offline maps, 3 = settings
     val state by TrackerState.flow.collectAsState()
 
     // the service (or the situation poll) flips this when the server revokes the device
@@ -106,12 +112,35 @@ fun TrackerApp() {
     val web = if (enrolled) remember { SituationWeb(ctx.applicationContext) } else null
     DisposableEffect(web) { onDispose { web?.destroy() } }
 
+    // Four tabs: Status (SOS, check-in, holder, reporting), Situation (the map), Maps (offline map
+    // packs) and Settings (server, updates, battery, appearance, sign out). The map has no top bar.
+    val tabs = listOf(
+        Triple("Status", AppIcons.status, session.unit.ifBlank { session.label }),
+        Triple("Situation", AppIcons.map, ""),
+        Triple("Maps", AppIcons.layers, "Offline maps"),
+        Triple("Settings", AppIcons.settings, "Settings"),
+    )
     Scaffold(
+        topBar = {
+            if (enrolled && tab != 1) {
+                val (_, _, title) = tabs[tab]
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1)
+                            if (tab == 0) Text("${session.label} · ${session.device}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                )
+            }
+        },
         bottomBar = {
             if (enrolled) {
                 NavigationBar {
-                    NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Text("◉") }, label = { Text("Status") })
-                    NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Text("◫") }, label = { Text("Situation") })
+                    tabs.forEachIndexed { i, (label, icon, _) ->
+                        NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icon, contentDescription = null) }, label = { Text(label) })
+                    }
                 }
             }
         },
@@ -119,7 +148,10 @@ fun TrackerApp() {
         if (enrolled && tab == 1 && web != null) {
             Column(Modifier.fillMaxSize().padding(padding)) { SituationScreen(session, web, state) }
         } else {
-            Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp)) {
+            Column(
+                Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 if (!enrolled) {
                     OnboardingScreen(session, revoked = session.revoked, wiped = state.wiped || DeviceReset.hasNotice(ctx)) {
                         DeviceReset.clearNotice(ctx)
@@ -127,10 +159,28 @@ fun TrackerApp() {
                         enrolled = true
                         tab = 0
                     }
-                } else {
-                    StatusScreen(session) { enrolled = false }
+                } else when (tab) {
+                    2 -> MapsScreen()
+                    3 -> SettingsScreen(session) { enrolled = false; tab = 0 }
+                    else -> StatusScreen(session)
                 }
+                Spacer(Modifier.height(8.dp))
             }
+        }
+    }
+}
+
+/** A titled card: the one container every native screen is built from. */
+@Composable
+private fun SectionCard(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, trailing: @Composable (() -> Unit)? = null, content: @Composable () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (icon != null) Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                trailing?.invoke()
+            }
+            content()
         }
     }
 }
@@ -392,10 +442,9 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
 // -------------------------------------------------------------------- status
 
 @Composable
-private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
+private fun StatusScreen(session: Session) {
     val ctx = LocalContext.current
     val state by TrackerState.flow.collectAsState()
-    var confirmSignOut by remember { mutableStateOf(false) }
     var permissionMessage by remember { mutableStateOf<String?>(null) }
 
     val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
@@ -423,85 +472,110 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
             delay(3000)
         }
     }
-    Text(session.unit.ifBlank { session.label }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-    Text("${session.label} · ${session.device}", style = MaterialTheme.typography.bodyMedium)
     // SOS and check-in come first: they are what a soldier opens the app for under pressure
-    Spacer(Modifier.height(16.dp))
     FieldPanel()
     holder?.let { h ->
-        Spacer(Modifier.height(12.dp))
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Holder", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(h.name.ifBlank { "—" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Row { Label("Appointment"); Text(h.appointment, fontWeight = FontWeight.Medium) }
-                Row { Label("Personnel no."); Mono(h.personnelNumber) }
-                Row { Label("Unit"); Text(session.unit.ifBlank { "—" }) }
-                if (h.primary) Text("Primary device: this phone positions the unit on the map.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                if (h.unverified) Text("Not confirmed in the roster yet (unverified).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                if (!h.canCommand) Text("Your commander or deputy issues orders, responds to reports and chalks off tasks.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        SectionCard("Holder", AppIcons.person) {
+            Text(h.name.ifBlank { "—" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Row { Label("Appointment"); Text(h.appointment, fontWeight = FontWeight.Medium) }
+            Row { Label("Personnel no."); Mono(h.personnelNumber) }
+            Row { Label("Unit"); Text(session.unit.ifBlank { "—" }) }
+            if (h.primary) Text("Primary device: this phone positions the unit on the map.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            if (h.unverified) Text("Not confirmed in the roster yet (unverified).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            if (!h.canCommand) Text("Your commander or deputy issues orders, responds to reports and chalks off tasks.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
-    Spacer(Modifier.height(16.dp))
 
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                state.status.uppercase(Locale.ROOT),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = when {
-                    state.running && state.status == "Reporting" -> MaterialTheme.colorScheme.primary
-                    state.running -> MaterialTheme.colorScheme.secondary
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-            Row { Label("Last fix"); Mono(state.lastFixMs?.let(::clock) ?: "—") }
-            Row { Label("Position"); Mono(if (state.lat != null) "%.5f, %.5f".format(state.lat, state.lon) else "—") }
-            Row { Label("Accuracy"); Mono(state.accuracy?.let { "±${it.toInt()} m" } ?: "—") }
-            Row { Label("Last sent"); Mono(state.lastSentMs?.let(::clock) ?: "—") }
-            Row { Label("Queued"); Mono("${state.queued} fix${if (state.queued == 1) "" else "es"}") }
+    SectionCard("Position reporting", AppIcons.status, trailing = {
+        Text(
+            state.status.uppercase(Locale.ROOT),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = when {
+                state.running && state.status == "Reporting" -> MaterialTheme.colorScheme.primary
+                state.running -> MaterialTheme.colorScheme.secondary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+    }) {
+        Row { Label("Last fix"); Mono(state.lastFixMs?.let(::clock) ?: "—") }
+        Row { Label("Position"); Mono(if (state.lat != null) "%.5f, %.5f".format(state.lat, state.lon) else "—") }
+        Row { Label("Accuracy"); Mono(state.accuracy?.let { "±${it.toInt()} m" } ?: "—") }
+        Row { Label("Last sent"); Mono(state.lastSentMs?.let(::clock) ?: "—") }
+        Row { Label("Queued"); Mono("${state.queued} fix${if (state.queued == 1) "" else "es"}") }
+        Spacer(Modifier.height(4.dp))
+        if (state.running) {
+            OutlinedButton(onClick = { TrackingService.stop(ctx) }, modifier = Modifier.fillMaxWidth()) { Text("Stop reporting") }
+        } else {
+            Button(onClick = ::startReporting, modifier = Modifier.fillMaxWidth()) { Text("Start reporting") }
         }
+        permissionMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        Text(
+            "Every ${session.intervalSeconds} s while running; fixes queue when there is no signal and go when there is.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
-    Spacer(Modifier.height(16.dp))
+}
 
-    if (state.running) {
-        OutlinedButton(onClick = { TrackingService.stop(ctx) }, modifier = Modifier.fillMaxWidth()) { Text("Stop reporting") }
-    } else {
-        Button(onClick = ::startReporting, modifier = Modifier.fillMaxWidth()) { Text("Start reporting") }
-    }
-    permissionMessage?.let {
-        Spacer(Modifier.height(8.dp))
-        Text(it, color = MaterialTheme.colorScheme.error)
-    }
-    Spacer(Modifier.height(16.dp))
+// ------------------------------------------------------------------ settings
+
+@Composable
+private fun SettingsScreen(session: Session, onSignedOut: () -> Unit) {
+    val ctx = LocalContext.current
+    var confirmSignOut by remember { mutableStateOf(false) }
     val checking by Updater.checking.collectAsState()
     val updateNote by Updater.note.collectAsState()
-    OutlinedButton(onClick = { Updater.checkNow(ctx) }, enabled = !checking, modifier = Modifier.fillMaxWidth()) {
-        Text(if (checking) "Checking…" else "Check for updates")
+    // battery optimisation: Android throttles background location unless the app is excluded
+    val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+    var ignoring by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            ignoring = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+            delay(3000)
+        }
     }
-    updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-    Text(
-        "Version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(8.dp))
-    Text(
-        "Reports every ${session.intervalSeconds} s while running, and keeps a queue when you're offline. " +
-            "For best results, exclude this app from battery optimisation.",
-        style = MaterialTheme.typography.bodySmall,
-    )
 
-    Spacer(Modifier.height(16.dp))
-    OfflineMapsCard()
-
-    Spacer(Modifier.height(16.dp))
-    ThemeRow()
-
-    Spacer(Modifier.height(24.dp))
-    TextButton(onClick = { confirmSignOut = true }) { Text("Sign out of this device") }
+    SectionCard("Server", AppIcons.server) {
+        Row { Label("Address"); Mono(session.site ?: "—") }
+        Row { Label("Device"); Mono(session.device) }
+        Row { Label("Unit"); Text(session.unit.ifBlank { "—" }) }
+    }
+    SectionCard("App", AppIcons.settings) {
+        Row { Label("Version"); Mono("${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})") }
+        OutlinedButton(onClick = { Updater.checkNow(ctx) }, enabled = !checking, modifier = Modifier.fillMaxWidth()) {
+            Text(if (checking) "Checking…" else "Check for updates")
+        }
+        updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+    SectionCard("Battery", AppIcons.battery) {
+        Text(
+            if (ignoring) "This app is excluded from battery optimisation: reporting keeps going with the screen off."
+            else "Android may pause reporting when the screen is off. Exclude this app from battery optimisation.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (ignoring) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
+        if (!ignoring) {
+            OutlinedButton(
+                onClick = {
+                    try {
+                        ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                    } catch (_: Exception) {
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Open battery settings") }
+        }
+    }
+    SectionCard("Appearance") { ThemeRow() }
+    SectionCard("Sign out") {
+        Text(
+            "Reporting stops and queued positions, SOS and check-ins are discarded. You will need a new enrolment code to report again.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(onClick = { confirmSignOut = true }, modifier = Modifier.fillMaxWidth()) { Text("Sign out of this device", color = MaterialTheme.colorScheme.error) }
+    }
 
     if (confirmSignOut) {
         AlertDialog(
@@ -533,7 +607,7 @@ private fun StatusScreen(session: Session, onSignedOut: () -> Unit) {
  * "Download on Wi-Fi automatically" switch (on by default; remembered).
  */
 @Composable
-private fun OfflineMapsCard() {
+private fun MapsScreen() {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { MapPacks.load(ctx) } }
     val rows by MapPacks.rows.collectAsState()
@@ -543,9 +617,10 @@ private fun OfflineMapsCard() {
     val note by MapPacks.note.collectAsState()
     var confirmDelete by remember { mutableStateOf<PackRow?>(null) }
 
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Offline maps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+    SectionCard("Map sheets", AppIcons.layers, trailing = {
+        TextButton(onClick = { MapPacks.refresh(ctx) }, enabled = !refreshing) { Text(if (refreshing) "Checking…" else "Refresh") }
+    }) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 "Maps of your area of operation for when there is no internet. The Situation map shows them under the online map.",
                 style = MaterialTheme.typography.bodySmall,
@@ -609,19 +684,20 @@ private fun OfflineMapsCard() {
                 if (sheets.isNotEmpty() || overview.isNotEmpty()) SectionTitle("Custom")
                 custom.forEach { line(it) }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.weight(1f)) {
-                    Text("Download on Wi-Fi automatically", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        if (auto) "On: new and updated sheets download by themselves on Wi-Fi." else "Off: maps download only when you tap Download.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = auto, onCheckedChange = { MapPacks.setAutoWifi(ctx, it) })
-            }
-            TextButton(onClick = { MapPacks.refresh(ctx) }, enabled = !refreshing) { Text(if (refreshing) "Checking…" else "Refresh list") }
             note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        }
+    }
+    SectionCard("Downloads") {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text("Download on Wi-Fi automatically", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (auto) "On: new and updated sheets download by themselves on Wi-Fi." else "Off: maps download only when you tap Download.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = auto, onCheckedChange = { MapPacks.setAutoWifi(ctx, it) })
         }
     }
 
@@ -703,8 +779,6 @@ private fun sizeText(b: Long): String =
 @Composable
 private fun ThemeRow() {
     val ctx = LocalContext.current
-    Text("Appearance", style = MaterialTheme.typography.labelLarge)
-    Spacer(Modifier.height(4.dp))
     val modes = ThemeMode.values()
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         modes.forEachIndexed { i, m ->
