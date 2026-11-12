@@ -49,6 +49,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalConfiguration
+import android.content.res.Configuration
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -91,7 +96,7 @@ fun TrackerApp() {
     val ctx = LocalContext.current
     val session = remember { Session(ctx.applicationContext) }
     var enrolled by remember { mutableStateOf(session.enrolled) }
-    var tab by remember { mutableStateOf(0) } // 0 = status, 1 = situation map, 2 = offline maps, 3 = settings
+    var tab by rememberSaveable { mutableStateOf(0) } // 0 = status, 1 = situation map, 2 = offline maps, 3 = settings
     val state by TrackerState.flow.collectAsState()
 
     // the service (or the situation poll) flips this when the server revokes the device
@@ -120,7 +125,18 @@ fun TrackerApp() {
         Triple("Maps", AppIcons.layers, "Offline maps"),
         Triple("Settings", AppIcons.settings, "Settings"),
     )
+    // landscape: the tabs move to a rail on the left, so the map keeps the full height
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    Row(Modifier.fillMaxSize()) {
+    if (enrolled && landscape) {
+        NavigationRail {
+            tabs.forEachIndexed { i, (label, icon, _) ->
+                NavigationRailItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icon, contentDescription = null) }, label = { Text(label) })
+            }
+        }
+    }
     Scaffold(
+        modifier = Modifier.weight(1f),
         topBar = {
             if (enrolled && tab != 1) {
                 val (_, _, title) = tabs[tab]
@@ -136,7 +152,7 @@ fun TrackerApp() {
             }
         },
         bottomBar = {
-            if (enrolled) {
+            if (enrolled && !landscape) {
                 NavigationBar {
                     tabs.forEachIndexed { i, (label, icon, _) ->
                         NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icon, contentDescription = null) }, label = { Text(label) })
@@ -167,6 +183,7 @@ fun TrackerApp() {
                 Spacer(Modifier.height(8.dp))
             }
         }
+    }
     }
 }
 
