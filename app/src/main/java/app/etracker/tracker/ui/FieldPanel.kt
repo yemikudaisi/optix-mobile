@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import app.etracker.tracker.data.Api
+import app.etracker.tracker.data.AutoReport
 import app.etracker.tracker.data.CheckinInfo
 import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.Session
@@ -77,6 +78,8 @@ import kotlinx.coroutines.withContext
 import app.etracker.tracker.data.FieldOutbox
 import app.etracker.tracker.data.FieldState
 import app.etracker.tracker.data.FieldUi
+import app.etracker.tracker.data.ReportingPrefs
+import app.etracker.tracker.service.TrackingService
 import app.etracker.tracker.data.OwnSos
 import app.etracker.tracker.data.SosAlertItem
 import app.etracker.tracker.service.FieldNotifier
@@ -169,6 +172,7 @@ fun FieldPanel() {
 
     CheckinCard(ui, now, checkinNote) { status ->
         checkinNote = null
+        if (ReportingPrefs.mode == AutoReport.CHECKIN) TrackingService.startIfPermitted(ctx)
         FieldOutbox.checkIn(ctx, status)
     }
 

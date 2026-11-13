@@ -78,6 +78,8 @@ import app.etracker.tracker.data.PackSlots
 import app.etracker.tracker.data.SituationCache
 import app.etracker.tracker.data.Session
 import app.etracker.tracker.data.TrackerState
+import app.etracker.tracker.data.AutoReport
+import app.etracker.tracker.data.ReportingPrefs
 import app.etracker.tracker.service.TrackingService
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
@@ -101,6 +103,26 @@ fun TrackerApp() {
 
     // the service (or the situation poll) flips this when the server revokes the device
     LaunchedEffect(state.revoked, state.wiped) { if (state.revoked || state.wiped) enrolled = session.enrolled }
+
+    // "Start reporting when the app opens" (Settings): once per run, and only if reporting is stopped.
+    // Location already allowed -> start. Not yet allowed -> ask once (the Status tab asks again on Start).
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted[Manifest.permission.ACCESS_FINE_LOCATION] == true || granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true) {
+            TrackingService.startIfPermitted(ctx)
+        }
+    }
+    LaunchedEffect(enrolled) {
+        if (!enrolled || ReportingPrefs.openHandled) return@LaunchedEffect
+        ReportingPrefs.openHandled = true
+        if (ReportingPrefs.mode != AutoReport.OPEN || state.running) return@LaunchedEffect
+        if (TrackingService.hasLocationPermission(ctx)) {
+            TrackingService.startIfPermitted(ctx)
+        } else {
+            val wanted = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= 33) wanted += Manifest.permission.POST_NOTIFICATIONS
+            askLocation.launch(wanted.toTypedArray())
+        }
+    }
 
     // update check at start and every few hours while the app is open (the tracking
     // service also checks, throttled, so a phone left in a pocket hears about updates and wipes)
@@ -564,6 +586,26 @@ private fun SettingsScreen(session: Session, onSignedOut: () -> Unit) {
             Text(if (checking) "Checking…" else "Check for updates")
         }
         updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+    SectionCard("Position reporting", AppIcons.status) {
+        Text("Start reporting automatically", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        AutoReport.values().forEach { m ->
+            Row(
+                Modifier.fillMaxWidth().clickable { ReportingPrefs.set(ctx, m) }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                RadioButton(selected = ReportingPrefs.mode == m, onClick = { ReportingPrefs.set(ctx, m) })
+                Column(Modifier.padding(top = 12.dp)) {
+                    Text(m.label, style = MaterialTheme.typography.bodyLarge)
+                    Text(m.hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Text(
+            "An SOS always starts reporting. Stopping it by hand holds until the app is opened again.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     SectionCard("Battery", AppIcons.battery) {
         Text(
