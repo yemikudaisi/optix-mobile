@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.FieldOutbox
+import app.etracker.tracker.data.ReportingPrefs
 import app.etracker.tracker.data.Updater
 import app.etracker.tracker.ui.TrackerApp
 import app.etracker.tracker.ui.ThemePrefs
@@ -15,6 +16,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ThemePrefs.load(this)
+        ReportingPrefs.load(this)
         enableEdgeToEdge() // bar icons follow the theme (TrackerTheme re-applies it on change)
         DeviceReset.resume(this) // finish an interrupted wipe / resend its acknowledgement
         FieldOutbox.start(this) // an SOS / check-in queued before the app was closed goes out now
