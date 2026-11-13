@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="updates" path="updates/" />
+    <!-- photos taken for reports (the system camera writes them here) -->
+    <cache-path name="photos" path="photos/" />
 </paths>
