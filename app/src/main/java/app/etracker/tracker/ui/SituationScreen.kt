@@ -9,12 +9,20 @@ import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
+import android.net.Uri
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -68,6 +76,10 @@ class SituationWeb(private val context: Context) {
     private val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
     private var ready = false
     private val queued = ArrayList<String>()
+
+    /** Set by SituationScreen, which owns the camera / gallery launchers: the page asked for a photo
+     *  (a file input that accepts images; `capture` asks for the camera). Answer through the callback. */
+    var pickImages: ((callback: ValueCallback<Array<Uri>>, camera: Boolean, multiple: Boolean) -> Unit)? = null
 
     init {
         configure(context)
@@ -138,6 +150,13 @@ class SituationWeb(private val context: Context) {
         view.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(m: ConsoleMessage): Boolean {
                 Log.d("SituationJS", "${m.message()} (${m.sourceId()}:${m.lineNumber()})")
+                return true
+            }
+
+            // a report form's PHOTO buttons: the camera (capture) or the gallery
+            override fun onShowFileChooser(webView: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+                val pick = pickImages ?: return false
+                pick(callback, params.isCaptureEnabled, params.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
                 return true
             }
         }
@@ -223,6 +242,39 @@ class SituationWeb(private val context: Context) {
 @Composable
 fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
     val ctx = LocalContext.current
+
+    // photos for reports: the system camera writes into our cache (shared through the FileProvider), or
+    // the gallery returns what was chosen; either way the page gets the file through the chooser callback
+    var pending by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    var shotUri by remember { mutableStateOf<Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        pending?.onReceiveValue(if (ok && shotUri != null) arrayOf(shotUri!!) else null)
+        pending = null
+    }
+    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        pending?.onReceiveValue(uris.takeIf { it.isNotEmpty() }?.toTypedArray())
+        pending = null
+    }
+    DisposableEffect(web) {
+        web.pickImages = { cb, useCamera, _ ->
+            pending?.onReceiveValue(null) // a chooser left open answers "nothing" before a new one
+            pending = cb
+            try {
+                if (useCamera) {
+                    val dir = java.io.File(ctx.cacheDir, "photos").apply { mkdirs() }
+                    val f = java.io.File(dir, "report-${System.currentTimeMillis()}.jpg")
+                    val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.updates", f)
+                    shotUri = uri
+                    camera.launch(uri)
+                } else gallery.launch("image/*")
+            } catch (e: Exception) {
+                Log.w("SituationJS", "photo picker: ${e.message}")
+                pending?.onReceiveValue(null)
+                pending = null
+            }
+        }
+        onDispose { web.pickImages = null }
+    }
 
     // follow the theme override / OS setting
     val dark = isDarkNow()
