@@ -311,6 +311,21 @@ object Api {
         return call(site, "etracker.devices.post_report", body).toString()
     }
 
+    /**
+     * The photos of a report this phone may see (its unit's and those below it), for the report's
+     * sheet: the server's JSON array [{name, type, data (base64)}] as text.
+     */
+    fun reportPhotos(site: String, token: String, entry: String): String {
+        val body = JSONObject().put("token", token).put("entry", entry)
+        val (status, text) = post("$site/api/method/etracker.devices.report_photos", body)
+        if (status !in 200..299) throw ApiException(status, serverMessage(text) ?: "HTTP $status")
+        return try {
+            JSONObject(text).getJSONArray("message").toString()
+        } catch (e: Exception) {
+            throw ApiException(status, "Unexpected response from server")
+        }
+    }
+
     private fun call(site: String, method: String, body: JSONObject): JSONObject {
         val (status, text) = post("$site/api/method/$method", body)
         if (status !in 200..299) throw ApiException(status, serverMessage(text) ?: "HTTP $status")

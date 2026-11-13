@@ -188,6 +188,24 @@ class SituationWeb(private val context: Context) {
             }
         }
 
+        /** A report's photos for its sheet; the answer comes back via Situation.photosResult(entry, ok, msg, json). */
+        @JavascriptInterface
+        fun photos(entry: String) {
+            scope.launch {
+                val site = session.site
+                val token = session.token
+                val code = try {
+                    if (site == null || token == null) throw IllegalStateException("Device is not enrolled")
+                    val json = Api.reportPhotos(site, token, entry)
+                    "Situation.photosResult(${JSONObject.quote(entry)},true,\"\",${JSONObject.quote(json)})"
+                } catch (e: Exception) {
+                    val msg = if (e is Api.ApiException) Api.describe(e) else (e.message ?: "Error")
+                    "Situation.photosResult(${JSONObject.quote(entry)},false,${JSONObject.quote(msg)},\"[]\")"
+                }
+                view.post { js("Situation.photosResult && $code") }
+            }
+        }
+
         /**
          * Hands a report (an SOS, an SOS cancel, a check-in, …) to the durable native outbox instead of
          * sending it now: it survives the page and the app closing and goes the moment there is signal,
