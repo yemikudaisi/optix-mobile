@@ -17,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
@@ -38,6 +39,8 @@ import app.etracker.tracker.data.FieldOutbox
 import app.etracker.tracker.data.FieldState
 import app.etracker.tracker.data.MapPacks
 import app.etracker.tracker.service.FieldNotifier
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import app.etracker.tracker.data.Updater
@@ -80,6 +83,13 @@ class SituationWeb(private val context: Context) {
     /** Set by SituationScreen, which owns the camera / gallery launchers: the page asked for a photo
      *  (a file input that accepts images; `capture` asks for the camera). Answer through the callback. */
     var pickImages: ((callback: ValueCallback<Array<Uri>>, camera: Boolean, multiple: Boolean) -> Unit)? = null
+
+    /** How many overlays the page has open that Back should close first (the full-screen photo, …). */
+    private val _backDepth = MutableStateFlow(0)
+    val backDepth: StateFlow<Int> = _backDepth
+
+    /** The Back button while the page has an overlay open: the page closes the newest one. */
+    fun back() = js("Situation.back && Situation.back()")
 
     init {
         configure(context)
@@ -164,6 +174,12 @@ class SituationWeb(private val context: Context) {
 
     /** Exposed to the page as `EtrackerNative`; the answer comes back via Situation.reportResult. */
     inner class ReportBridge {
+        /** The page reports how many overlays Back should close before it goes to the app. */
+        @JavascriptInterface
+        fun backDepth(n: Int) {
+            _backDepth.value = n
+        }
+
         @JavascriptInterface
         fun submit(id: String, reportJson: String) {
             scope.launch {
@@ -293,6 +309,10 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
         }
         onDispose { web.pickImages = null }
     }
+
+    // Back closes the page's overlay (the full-screen photo, …) before it leaves the tab
+    val backDepth by web.backDepth.collectAsState()
+    BackHandler(enabled = backDepth > 0) { web.back() }
 
     // follow the theme override / OS setting
     val dark = isDarkNow()
