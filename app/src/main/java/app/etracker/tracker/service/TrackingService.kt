@@ -141,6 +141,7 @@ class TrackingService : Service() {
                             accuracy = if (loc.hasAccuracy()) loc.accuracy else null,
                             speed = if (loc.hasSpeed()) loc.speed else null,
                             heading = if (loc.hasBearing()) loc.bearing else null,
+                            provider = loc.provider,
                         ),
                     )
                     TrackerState.update {

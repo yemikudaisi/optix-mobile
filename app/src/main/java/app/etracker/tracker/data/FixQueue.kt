@@ -11,18 +11,21 @@ import android.database.sqlite.SQLiteOpenHelper
  * reboot never loses a position.
  */
 class FixQueue private constructor(context: Context) :
-    SQLiteOpenHelper(context, "fixes.db", null, 1) {
+    SQLiteOpenHelper(context, "fixes.db", null, 2) {
 
     class Row(val id: Long, val fix: Fix)
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE fixes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, " +
-                "lat REAL NOT NULL, lon REAL NOT NULL, acc REAL, speed REAL, heading REAL)",
+                "lat REAL NOT NULL, lon REAL NOT NULL, acc REAL, speed REAL, heading REAL, provider TEXT)",
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {}
+    // v2 adds the location provider; fixes already queued keep theirs empty (the server records "Device")
+    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
+        if (old < 2) db.execSQL("ALTER TABLE fixes ADD COLUMN provider TEXT")
+    }
 
     @Synchronized
     fun add(f: Fix) {
@@ -36,6 +39,7 @@ class FixQueue private constructor(context: Context) :
                 put("acc", f.accuracy?.toDouble())
                 put("speed", f.speed?.toDouble())
                 put("heading", f.heading?.toDouble())
+                put("provider", f.provider)
             },
         )
         // cap the backlog: drop the oldest beyond MAX_QUEUED
@@ -49,7 +53,7 @@ class FixQueue private constructor(context: Context) :
     fun peek(limit: Int): List<Row> {
         val out = ArrayList<Row>()
         readableDatabase.rawQuery(
-            "SELECT id, ts, lat, lon, acc, speed, heading FROM fixes ORDER BY id ASC LIMIT ?",
+            "SELECT id, ts, lat, lon, acc, speed, heading, provider FROM fixes ORDER BY id ASC LIMIT ?",
             arrayOf(limit.toString()),
         ).use { c ->
             while (c.moveToNext()) {
@@ -62,6 +66,7 @@ class FixQueue private constructor(context: Context) :
                         accuracy = if (c.isNull(4)) null else c.getFloat(4),
                         speed = if (c.isNull(5)) null else c.getFloat(5),
                         heading = if (c.isNull(6)) null else c.getFloat(6),
+                        provider = if (c.isNull(7)) null else c.getString(7),
                     ),
                 )
             }
