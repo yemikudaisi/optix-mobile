@@ -5,8 +5,12 @@ import android.content.Context
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -72,6 +76,8 @@ import app.etracker.tracker.data.Updater
 import kotlinx.coroutines.delay
 import app.etracker.tracker.data.FieldOutbox
 import app.etracker.tracker.data.FixQueue
+import app.etracker.tracker.data.Holder
+import app.etracker.tracker.data.TrackerUi
 import app.etracker.tracker.data.MapPacks
 import app.etracker.tracker.data.PackRow
 import app.etracker.tracker.data.PackSlots
@@ -98,7 +104,9 @@ fun TrackerApp() {
     val ctx = LocalContext.current
     val session = remember { Session(ctx.applicationContext) }
     var enrolled by remember { mutableStateOf(session.enrolled) }
-    var tab by rememberSaveable { mutableStateOf(0) } // 0 = status, 1 = situation map, 2 = offline maps, 3 = settings
+    // the app opens on the map: it is what a soldier opens it for. SOS and check-in stay one tap away on Status,
+    // and a bar over the map says when the position is not being reported.
+    var tab by rememberSaveable { mutableStateOf(1) } // 0 = status, 1 = situation map, 2 = offline maps, 3 = settings
     val state by TrackerState.flow.collectAsState()
 
     // the service (or the situation poll) flips this when the server revokes the device
@@ -184,10 +192,16 @@ fun TrackerApp() {
         },
     ) { padding ->
         if (enrolled && tab == 1 && web != null) {
-            Column(Modifier.fillMaxSize().padding(padding)) { SituationScreen(session, web, state) }
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                if (!state.running) NotReportingBar { tab = 0 }
+                SituationScreen(session, web, state)
+            }
         } else {
+            // on a tablet the cards keep a readable width, centred, instead of stretching edge to edge;
+            // Status may go wider because it lays out in two columns there
+            Box(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
             Column(
-                Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+                Modifier.widthIn(max = if (enrolled && tab == 0) 1040.dp else 680.dp).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!enrolled) {
@@ -195,7 +209,7 @@ fun TrackerApp() {
                         DeviceReset.clearNotice(ctx)
                         TrackerState.update { copy(wiped = false, revoked = false, status = "Stopped") }
                         enrolled = true
-                        tab = 0
+                        tab = 1
                     }
                 } else when (tab) {
                     2 -> MapsScreen()
@@ -204,8 +218,21 @@ fun TrackerApp() {
                 }
                 Spacer(Modifier.height(8.dp))
             }
+            }
         }
     }
+    }
+}
+
+/** Over the map while the phone is not reporting its position: the Start button is on Status. */
+@Composable
+private fun NotReportingBar(onOpenStatus: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.errorContainer).clickable(onClick = onOpenStatus).padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("NOT REPORTING YOUR POSITION", color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+        Text("START ON STATUS ›", color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.labelLarge)
     }
 }
 
@@ -511,8 +538,26 @@ private fun StatusScreen(session: Session) {
             delay(3000)
         }
     }
-    // SOS and check-in come first: they are what a soldier opens the app for under pressure
-    FieldPanel()
+    // SOS and check-in come first: they are what a soldier opens the app for under pressure. On a tablet
+    // they take the left column and the holder and reporting cards the right, so nothing stretches.
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= 760.dp) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) { FieldPanel() }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) { HolderAndReporting(session, holder, state, permissionMessage, ::startReporting) }
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                FieldPanel()
+                HolderAndReporting(session, holder, state, permissionMessage, ::startReporting)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HolderAndReporting(session: Session, holder: Holder?, state: TrackerUi, permissionMessage: String?, startReporting: () -> Unit) {
+    val ctx = LocalContext.current
     holder?.let { h ->
         SectionCard("Holder", AppIcons.person) {
             Text(h.name.ifBlank { "—" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -546,7 +591,7 @@ private fun StatusScreen(session: Session) {
         if (state.running) {
             OutlinedButton(onClick = { TrackingService.stop(ctx) }, modifier = Modifier.fillMaxWidth()) { Text("Stop reporting") }
         } else {
-            Button(onClick = ::startReporting, modifier = Modifier.fillMaxWidth()) { Text("Start reporting") }
+            Button(onClick = startReporting, modifier = Modifier.fillMaxWidth()) { Text("Start reporting") }
         }
         permissionMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Text(
