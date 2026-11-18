@@ -17,6 +17,8 @@ data class Fix(
     val accuracy: Float? = null,
     val speed: Float? = null,
     val heading: Float? = null,
+    /** The location provider ("fused", "gps", "network"): the fix's source on the server (NFFI). */
+    val provider: String? = null,
 )
 
 /**
@@ -139,6 +141,7 @@ object Api {
                         f.accuracy?.let { put("accuracy", it.toDouble()) }
                         f.speed?.let { put("speed", it.toDouble()) }
                         f.heading?.let { put("heading", it.toDouble()) }
+                        f.provider?.let { put("provider", it) }
                     },
             )
         }
