@@ -87,9 +87,8 @@ import app.etracker.tracker.data.TrackerState
 import app.etracker.tracker.data.AutoReport
 import app.etracker.tracker.data.ReportingPrefs
 import app.etracker.tracker.service.TrackingService
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -140,7 +139,8 @@ fun TrackerApp() {
             delay(3 * 60 * 60 * 1000L)
         }
     }
-    if (enrolled) UpdatePrompt()
+    // the update prompt also shows before enrolment (and after a revoke): such a phone can still update itself
+    UpdatePrompt()
 
     // the situation map's WebView lives as long as the device is enrolled, so
     // switching tabs doesn't reload it
@@ -333,23 +333,36 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
         }
     }
 
+    // QR scanning built into the app (ZXing): it asks for the camera itself and works offline and without Google Play
+    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val raw = result.contents
+        if (raw == null) {
+            error = if (result.originalIntent?.hasExtra("MISSING_CAMERA_PERMISSION") == true) "Allow the camera to scan, or type the code." else null
+            return@rememberLauncherForActivityResult
+        }
+        try {
+            // QR payload from the web app: {"v":1,"site":"https://…","code":"ABCD1234"}
+            val o = JSONObject(raw)
+            site = o.getString("site")
+            code = o.getString("code")
+            next(site, code)
+        } catch (e: Exception) {
+            error = "That QR code isn't an OPTIX enrolment code."
+        }
+    }
+
     fun scan() {
         error = null
-        val options = GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
-        GmsBarcodeScanning.getClient(ctx, options).startScan()
-            .addOnSuccessListener { barcode ->
-                try {
-                    // QR payload from the web app: {"v":1,"site":"https://…","code":"ABCD1234"}
-                    val o = JSONObject(barcode.rawValue ?: "")
-                    site = o.getString("site")
-                    code = o.getString("code")
-                    next(site, code)
-                } catch (e: Exception) {
-                    error = "That QR code isn't an OPTIX enrolment code."
-                }
-            }
-            .addOnFailureListener { error = it.message ?: "Scanning failed or was cancelled." }
+        scanner.launch(
+            ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the enrolment QR code")
+                .setBeepEnabled(false).setOrientationLocked(false),
+        )
     }
+
+    // a phone that is not enrolled (or was revoked) still hears about app updates from the last server it used
+    val checking by Updater.checking.collectAsState()
+    val updateNote by Updater.note.collectAsState()
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { Updater.check(ctx, force = true) } }
 
     if (step == 0) {
         Text("Enrol this device", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -391,6 +404,18 @@ private fun OnboardingScreen(session: Session, revoked: Boolean, wiped: Boolean,
             enabled = !busy && code.isNotBlank() && site.length > 8,
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (busy) "Checking…" else "Next") }
+        if (site.length > 8) {
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = {
+                    // the server typed above (or the last one used) is asked; no enrolment needed
+                    runCatching { session.rememberSite(Api.normalizeSite(site)) }
+                    Updater.checkNow(ctx)
+                },
+                enabled = !checking,
+            ) { Text(if (checking) "Checking for an app update…" else "Check for app update") }
+            updateNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
     } else {
         val verified = lookup?.verified == true
         val blocked = lookup?.blocked

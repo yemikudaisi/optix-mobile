@@ -159,9 +159,12 @@ object Api {
     }
 
     /** Asks whether a newer app exists than [versionCode]. Also works as a heartbeat (carries the wipe flag). */
-    fun getAppUpdate(site: String, token: String, versionCode: Int): UpdateCheck {
-        val m = call(site, "etracker.devices.get_app_update", JSONObject().put("token", token).put("version_code", versionCode))
+    /** With no [token] (not enrolled, or revoked) the server's public update check is used: the published app only. */
+    fun getAppUpdate(site: String, token: String?, versionCode: Int): UpdateCheck {
+        val m = if (token == null) call(site, "etracker.devices.get_public_app_update", JSONObject().put("version_code", versionCode))
+        else call(site, "etracker.devices.get_app_update", JSONObject().put("token", token).put("version_code", versionCode))
         val wipe = m.optBoolean("wipe", false)
+        if (m.optBoolean("disabled", false)) throw ApiException(403, "This server does not offer app updates before enrolment.")
         if (!m.optBoolean("update_available", false)) return UpdateCheck(null, wipe)
         return UpdateCheck(
             AppUpdate(
@@ -185,9 +188,10 @@ object Api {
      * Streams the APK to [dest] (POST, so the token stays out of URLs and logs) and
      * returns its SHA-256 (lower-case hex). [onProgress] gets (bytes so far, total or 0).
      */
-    fun downloadApp(site: String, token: String, dest: File, expectedSize: Long, versionCode: Int, onProgress: (Long, Long) -> Unit): String {
+    fun downloadApp(site: String, token: String?, dest: File, expectedSize: Long, versionCode: Int, onProgress: (Long, Long) -> Unit): String {
+        val method = if (token == null) "download_public_app" else "download_app"
         val conn = try {
-            URL("$site/api/method/etracker.devices.download_app").openConnection() as HttpURLConnection
+            URL("$site/api/method/etracker.devices.$method").openConnection() as HttpURLConnection
         } catch (e: Exception) {
             throw ApiException(0, "Bad server address")
         }
@@ -198,7 +202,8 @@ object Api {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             // ask for exactly the version whose checksum the caller holds (older servers ignore it)
-            conn.outputStream.use { it.write(JSONObject().put("token", token).put("version_code", versionCode).toString().toByteArray(Charsets.UTF_8)) }
+            val body = JSONObject().put("version_code", versionCode).also { if (token != null) it.put("token", token) }
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             val status = conn.responseCode
             if (status !in 200..299) {
                 val text = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""

@@ -125,8 +125,13 @@ class Session(context: Context) {
         prefs.edit().remove("token").putBoolean("revoked", true).apply()
     }
 
+    /** Remembers a server address typed before enrolment (so a phone that is not enrolled can check for app updates). */
+    fun rememberSite(s: String) {
+        prefs.edit().putString("last_site", s).apply()
+    }
+
     fun clear() {
-        val keep = site
+        val keep = site ?: lastSite // signing out twice must not forget the server
         val h = lastHolder
         prefs.edit().clear().putString("last_site", keep).apply {
             if (h != null) {
