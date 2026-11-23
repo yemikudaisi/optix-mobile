@@ -66,40 +66,45 @@ object Updater {
      * Checks the server (also the wipe heartbeat). Throttled to one call per
      * [MIN_GAP_MS] unless [force]. Blocking: call from a background thread/coroutine.
      */
-    fun check(context: Context, force: Boolean = false) {
+    /** Returns null when the server answered, or why it could not be asked. */
+    fun check(context: Context, force: Boolean = false): String? {
         val app = context.applicationContext
-        if (DeviceReset.active) return
+        if (DeviceReset.active) return "The phone is being reset."
         val busy = _phase.value
-        if (busy is UpdatePhase.Downloading) return
+        if (busy is UpdatePhase.Downloading) return null
         val now = System.currentTimeMillis()
-        if (!force && now - lastCheck < MIN_GAP_MS) return
+        if (!force && now - lastCheck < MIN_GAP_MS) return null
         val session = Session(app)
-        val site = session.site ?: return
-        val token = session.token ?: return
-        if (!isOnline(app)) return
+        // not enrolled (or revoked): the last server this phone used, asked without a token (published app only)
+        val site = session.site ?: session.lastSite ?: return "Type the server address first."
+        val token = session.token
+        if (!isOnline(app)) return "No connection."
         lastCheck = now
         cleanCache(app)
         try {
             val r = Api.getAppUpdate(site, token, BuildConfig.VERSION_CODE)
-            if (r.wipe) {
+            if (token != null && r.wipe) {
                 DeviceReset.wipe(app)
-                return
+                return null
             }
             val u = r.update
             if (u == null || u.versionCode <= BuildConfig.VERSION_CODE) {
                 if (_phase.value !is UpdatePhase.Failed) _phase.value = UpdatePhase.Idle
-                return
+                return null
             }
             val cur = _phase.value
             // keep an in-flight state for the same version; otherwise (re)offer it, honouring "Later"
-            if (cur is UpdatePhase.Ready && cur.info.versionCode == u.versionCode) return
-            if (cur is UpdatePhase.NeedsPermission && cur.info.versionCode == u.versionCode) return
+            if (cur is UpdatePhase.Ready && cur.info.versionCode == u.versionCode) return null
+            if (cur is UpdatePhase.NeedsPermission && cur.info.versionCode == u.versionCode) return null
             val snoozed = !u.mandatory && u.versionCode == snoozedCode && now < snoozeUntil
             _phase.value = if (snoozed) UpdatePhase.Idle else UpdatePhase.Available(u)
+            return null
         } catch (e: Api.ApiException) {
-            if (e.authFailure) DeviceReset.signOut(app)
-            // anything else (offline, server busy): stay quiet, try again later
+            if (token != null && e.authFailure) DeviceReset.signOut(app)
+            // automatic checks stay quiet and try again later; a manual check says why
+            return e.message ?: "The server could not be asked."
         } catch (_: Exception) {
+            return "Could not reach the server."
         }
     }
 
@@ -113,8 +118,8 @@ object Updater {
                 val app = context.applicationContext
                 if (!isOnline(app)) { _note.value = "No connection."; return@launch }
                 snoozeUntil = 0L
-                check(app, force = true)
-                _note.value = when (val p = _phase.value) {
+                val failed = check(app, force = true)
+                _note.value = if (failed != null) failed else when (_phase.value) {
                     is UpdatePhase.Idle -> "You're on the latest version."
                     is UpdatePhase.Failed -> "Update found but the download failed."
                     else -> "Update available."
@@ -188,10 +193,10 @@ object Updater {
 
     private fun download(app: Context, requested: Api.AppUpdate) {
         val session = Session(app)
-        val site = session.site
-        val token = session.token
-        if (site == null || token == null) {
-            _phase.value = UpdatePhase.Failed(requested, "This device is not enrolled.")
+        val site = session.site ?: session.lastSite
+        val token = session.token // null: not enrolled, the public download is used
+        if (site == null) {
+            _phase.value = UpdatePhase.Failed(requested, "No server address yet: enter it on the enrolment screen.")
             return
         }
         // the offer may be stale (a newer version published since the check): ask again right before
@@ -202,7 +207,7 @@ object Updater {
                 return
             }
         } catch (e: Api.ApiException) {
-            if (e.authFailure) { DeviceReset.signOut(app); return }
+            if (token != null && e.authFailure) { DeviceReset.signOut(app); return }
             requested
         } catch (_: Exception) {
             requested
@@ -234,7 +239,7 @@ object Updater {
             finish(app, info, dest)
         } catch (e: Api.ApiException) {
             when {
-                e.authFailure -> DeviceReset.signOut(app)
+                token != null && e.authFailure -> DeviceReset.signOut(app)
                 else -> _phase.value = UpdatePhase.Failed(info, if (e.status == 0) "Can't reach the server (${e.message}). Your reports are still queued." else Api.describe(e))
             }
         } catch (e: Exception) {

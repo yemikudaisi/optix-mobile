@@ -70,9 +70,11 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    // fused location + QR scanning (Google Play services; no camera permission needed)
+    // fused location (Google Play services)
     implementation("com.google.android.gms:play-services-location:21.3.0")
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // QR scanning built into the app (ZXing): works offline and on phones without Google Play, unlike the
+    // Play-services code scanner, whose UI module Google Play downloads on first use
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // serves the bundled Situation map page over https://appassets.androidplatform.net
     implementation("androidx.webkit:webkit:1.12.1")
