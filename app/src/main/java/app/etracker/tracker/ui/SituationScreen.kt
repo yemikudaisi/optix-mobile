@@ -181,6 +181,32 @@ class SituationWeb(private val context: Context) {
         fun declination(lat: Double, lng: Double): Float =
             android.hardware.GeomagneticField(lat.toFloat(), lng.toFloat(), 0f, System.currentTimeMillis()).declination
 
+        /** A copy of a photo in the phone's gallery (Pictures/OPTIX) needs no permission from Android 10. */
+        @JavascriptInterface
+        fun galleryAvailable(): Boolean = android.os.Build.VERSION.SDK_INT >= 29
+
+        /** Save a photo the page made (a JPEG data: URL, already stamped) to the gallery; only when the phone's
+         *  setting allows it (the page asks), off by default since a lost phone would give away positions. */
+        @JavascriptInterface
+        fun saveToGallery(dataUrl: String, name: String): Boolean {
+            if (android.os.Build.VERSION.SDK_INT < 29) return false
+            return try {
+                val bytes = android.util.Base64.decode(dataUrl.substringAfter(','), android.util.Base64.DEFAULT)
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name.replace(Regex("[^A-Za-z0-9_-]"), "_") + ".jpg")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/OPTIX")
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                true
+            } catch (e: Exception) {
+                Log.w("SituationJS", "gallery copy failed: ${e.message}")
+                false
+            }
+        }
+
         /** The phone's own track (data/TrackLog): recorded by the reporting service while on. */
         @JavascriptInterface
         fun track(): String = app.etracker.tracker.data.TrackLog.json(context)
