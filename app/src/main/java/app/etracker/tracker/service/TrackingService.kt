@@ -21,6 +21,7 @@ import app.etracker.tracker.R
 import app.etracker.tracker.data.Api
 import app.etracker.tracker.data.DeviceReset
 import app.etracker.tracker.data.FieldOutbox
+import app.etracker.tracker.data.TrackLog
 import app.etracker.tracker.data.FieldState
 import app.etracker.tracker.data.FieldUi
 import app.etracker.tracker.data.Fix
@@ -144,6 +145,7 @@ class TrackingService : Service() {
                             provider = loc.provider,
                         ),
                     )
+                    TrackLog.add(this@TrackingService, loc.time, loc.latitude, loc.longitude, if (loc.hasAccuracy()) loc.accuracy else null)
                     TrackerState.update {
                         copy(
                             lastFixMs = loc.time, lat = loc.latitude, lon = loc.longitude,

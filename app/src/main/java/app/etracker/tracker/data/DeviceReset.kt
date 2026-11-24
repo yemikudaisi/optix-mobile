@@ -179,6 +179,7 @@ object DeviceReset {
         if (!session.enrolled) return
         session.markRevoked()
         FixQueue.get(app).clear()
+        TrackLog.clear(app)
         FieldOutbox.clear(app) // nothing queued can be sent with a dead token
         SituationCache.clear(app)
         MapPacks.clear(app) // the operation's maps are not left on a phone the server has dropped

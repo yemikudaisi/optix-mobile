@@ -14,8 +14,8 @@ android {
         applicationId = "app.etracker.tracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 33
-        versionName = "0.8.13"
+        versionCode = 34
+        versionName = "0.8.14"
     }
 
     // Release signing key: kept OUTSIDE the repo (default ~/.optix-signing/keystore.properties, or the

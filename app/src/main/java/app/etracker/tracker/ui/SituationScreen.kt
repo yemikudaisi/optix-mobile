@@ -175,6 +175,22 @@ class SituationWeb(private val context: Context) {
     /** Exposed to the page as `EtrackerNative`; the answer comes back via Situation.reportResult. */
     inner class ReportBridge {
         /** The page reports how many overlays Back should close before it goes to the app. */
+        /** Magnetic declination (degrees, east positive) at a point, from Android's own world magnetic
+         *  model: no network. The page turns its compass headings to true / grid bearings with it. */
+        @JavascriptInterface
+        fun declination(lat: Double, lng: Double): Float =
+            android.hardware.GeomagneticField(lat.toFloat(), lng.toFloat(), 0f, System.currentTimeMillis()).declination
+
+        /** The phone's own track (data/TrackLog): recorded by the reporting service while on. */
+        @JavascriptInterface
+        fun track(): String = app.etracker.tracker.data.TrackLog.json(context)
+
+        @JavascriptInterface
+        fun trackRecord(on: Boolean) = app.etracker.tracker.data.TrackLog.setRecording(context, on)
+
+        @JavascriptInterface
+        fun trackClear() = app.etracker.tracker.data.TrackLog.clear(context)
+
         @JavascriptInterface
         fun backDepth(n: Int) {
             _backDepth.value = n
