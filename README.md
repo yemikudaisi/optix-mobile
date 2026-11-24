@@ -29,6 +29,11 @@ OPTIX server repo (yemikudaisi/etracker) (summarised below).
   keeps the last picture for offline use. What a device may see is set per device
   on the Devices page (*Own operation* / *None*; the threat/IPB layer is a
   separate, off-by-default tick).
+* **Without a network** — GO TO converts a typed position (MGRS, UTM, lat/long, DMS) and
+  navigates to it by compass in a straight line; patrol routes (planned at HQ or on the phone) are
+  kept on the phone and walked waypoint by waypoint with an off-track warning; the reporting
+  service records the phone's own track (`data/TrackLog`), which can be turned into a route back.
+  Bearings are grid and magnetic (declination from Android's `GeomagneticField`, no network).
 * **Offline maps** — the server publishes MBTiles packs per map sheet (plus an
   overview per series and custom packs). The Status tab's *Offline maps* card
   lists *Overview*, *Sheets for your AO* (sheet number + name in sheet order, one
