@@ -84,6 +84,12 @@ class SituationWeb(private val context: Context) {
      *  (a file input that accepts images; `capture` asks for the camera). Answer through the callback. */
     var pickImages: ((callback: ValueCallback<Array<Uri>>, camera: Boolean, multiple: Boolean) -> Unit)? = null
 
+    /** Set by SituationScreen, which owns the QR scanner: the page asked to scan a shared point or route. */
+    var scanQr: ((prompt: String) -> Unit)? = null
+
+    /** The scanned text (null: cancelled) back to the page. */
+    fun qrResult(text: String?) = js("Situation.qrResult && Situation.qrResult(${if (text == null) "null" else JSONObject.quote(text)})")
+
     /** How many overlays the page has open that Back should close first (the full-screen photo, …). */
     private val _backDepth = MutableStateFlow(0)
     val backDepth: StateFlow<Int> = _backDepth
@@ -180,6 +186,33 @@ class SituationWeb(private val context: Context) {
         @JavascriptInterface
         fun declination(lat: Double, lng: Double): Float =
             android.hardware.GeomagneticField(lat.toFloat(), lng.toFloat(), 0f, System.currentTimeMillis()).declination
+
+        /** Scan a QR code another phone shows (a point or a route shared without a network); the text comes
+         *  back through Situation.qrResult. */
+        @JavascriptInterface
+        fun scanQr(prompt: String) {
+            view.post { scanQr?.invoke(prompt) ?: qrResult(null) }
+        }
+
+        /** A QR code for the text as a PNG data: URL (ZXing, offline), or "" if it does not fit. */
+        @JavascriptInterface
+        fun qrPng(text: String): String = try {
+            val hints = mapOf(com.google.zxing.EncodeHintType.ERROR_CORRECTION to com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.M,
+                com.google.zxing.EncodeHintType.MARGIN to 2, com.google.zxing.EncodeHintType.CHARACTER_SET to "UTF-8")
+            val m = com.google.zxing.qrcode.QRCodeWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, 0, 0, hints)
+            val scale = maxOf(4, 720 / m.width)
+            val bmp = android.graphics.Bitmap.createBitmap(m.width * scale, m.height * scale, android.graphics.Bitmap.Config.RGB_565)
+            for (y in 0 until m.height) for (x in 0 until m.width) {
+                val c = if (m.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                for (dy in 0 until scale) for (dx in 0 until scale) bmp.setPixel(x * scale + dx, y * scale + dy, c)
+            }
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+            "data:image/png;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.w("SituationJS", "qr: ${e.message}")
+            ""
+        }
 
         /** A copy of a photo in the phone's gallery (Pictures/OPTIX) needs no permission from Android 10. */
         @JavascriptInterface
@@ -350,6 +383,18 @@ fun SituationScreen(session: Session, web: SituationWeb, state: TrackerUi) {
             }
         }
         onDispose { web.pickImages = null }
+    }
+
+    // a point or a route shared by another phone's QR code (ZXing, offline); the text goes back to the page
+    val qrScanner = rememberLauncherForActivityResult(com.journeyapps.barcodescanner.ScanContract()) { result -> web.qrResult(result.contents) }
+    DisposableEffect(web) {
+        web.scanQr = { prompt ->
+            qrScanner.launch(
+                com.journeyapps.barcodescanner.ScanOptions().setDesiredBarcodeFormats(com.journeyapps.barcodescanner.ScanOptions.QR_CODE)
+                    .setPrompt(prompt).setBeepEnabled(false).setOrientationLocked(false),
+            )
+        }
+        onDispose { web.scanQr = null }
     }
 
     // Back closes the page's overlay (the full-screen photo, …) before it leaves the tab
