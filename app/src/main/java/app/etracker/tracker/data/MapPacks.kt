@@ -479,12 +479,19 @@ object MapPacks {
     }
 
     /**
-     * Answer for https://tiles.optix.invalid/<pack>/<z>/<x>/<y>[.ext] from the WebView. A tile the
+     * Answer for https://tiles.optix.invalid/<pack>/<z>/<x>/<y>[.ext] from the WebView (and /places?q=, see [places]). A tile the
      * pack does not have (or a pack not on the phone) is a transparent PNG, so the page never shows
      * a broken image and the map under it shows through.
      */
     fun serve(context: Context, url: Uri): WebResourceResponse {
         val seg = url.pathSegments
+        if (seg.size == 1 && seg[0] == "places") {  // https://tiles.optix.invalid/places?q=<name>[&lat=&lng=]
+            val res = runCatching {
+                places(context, url.getQueryParameter("q") ?: "", url.getQueryParameter("lat")?.toDoubleOrNull(),
+                    url.getQueryParameter("lng")?.toDoubleOrNull())
+            }.getOrElse { JSONArray() }
+            return serveJson(JSONObject().put("places", res).put("packs", installed(context).count { it.id !in noPlaces }).toString())
+        }
         val bytes = if (seg.size == 4) {
             val id = seg[0]
             val z = seg[1].toIntOrNull()
@@ -496,6 +503,84 @@ object MapPacks {
         val headers = mapOf("Cache-Control" to "no-store", "Access-Control-Allow-Origin" to "*")
         return WebResourceResponse(if (bytes != null) mime(bytes) else "image/png", null, 200, "OK", headers, ByteArrayInputStream(body))
     }
+
+    // ------------------------------------------------------------------ place names, searched offline
+
+    private val noPlaces = ConcurrentHashMap.newKeySet<String>()
+
+    /** A name folded as the pack tool folds it (tools/optix_places.py norm): no accents, lower case, a-z 0-9, single spaces. */
+    fun norm(s: String): String {
+        val d = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKD).replace(Regex("\\p{M}+"), "").lowercase()
+        return d.replace(Regex("[^a-z0-9]+"), " ").trim().replace(Regex(" +"), " ")
+    }
+
+    private fun km(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
+        val r = Math.PI / 180
+        val a = Math.sin((lat2 - lat1) * r / 2).let { it * it } +
+            Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin((lng2 - lng1) * r / 2).let { it * it }
+        return 12742.0 * Math.asin(Math.min(1.0, Math.sqrt(a)))
+    }
+
+    /**
+     * The installed packs' place names (table optix_places, written by the pack tool) matching every word of [query]:
+     * the whole name first, then names starting with it, then a word starting with it, then anywhere; then by rank,
+     * then nearest to [lat]/[lng] when given. The same name and kind within 3 km (a river's points, a place on two
+     * packs) is listed once, the nearest. Works with no network.
+     */
+    fun places(context: Context, query: String, lat: Double?, lng: Double?, limit: Int = 40): JSONArray {
+        val q = norm(query)
+        val out = JSONArray()
+        if (q.length < 2) return out
+        val words = q.split(' ')
+        data class Hit(val name: String, val n: String, val kind: String, val lat: Double, val lng: Double, val rank: Int, val score: Int, val km: Double?, val pack: String)
+        val hits = ArrayList<Hit>()
+        val ctx = context.applicationContext
+        for (p in installed(ctx)) {
+            if (p.id in noPlaces) continue
+            val db = open(ctx, p.id) ?: continue
+            val ok = runCatching {
+                db.rawQuery("select 1 from sqlite_master where type = 'table' and name = 'optix_places'", null).use { it.moveToFirst() }
+            }.getOrDefault(false)
+            if (!ok) { noPlaces.add(p.id); continue }
+            runCatching {
+                db.rawQuery(
+                    "select name, kind, lon, lat, rank, norm from optix_places where norm like ? limit 2000",
+                    arrayOf("%" + words.maxBy { it.length } + "%"),
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val n = c.getString(5) ?: continue
+                        if (!words.all { n.contains(it) }) continue
+                        val score = when {
+                            n == q -> 0
+                            n.startsWith(q) -> 1
+                            (" $n").contains(" $q") -> 2
+                            else -> 3
+                        }
+                        val la = c.getDouble(3)
+                        val lo = c.getDouble(2)
+                        hits.add(Hit(c.getString(0), n, c.getString(1) ?: "", la, lo, c.getInt(4), score,
+                            if (lat != null && lng != null) km(lat, lng, la, lo) else null, p.id))
+                    }
+                }
+            }
+        }
+        hits.sortWith(compareBy<Hit>({ it.score }, { it.rank }, { it.km ?: 0.0 }, { it.name }))
+        val kept = ArrayList<Hit>()
+        for (h in hits) {
+            if (kept.size >= limit) break
+            if (kept.any { it.kind == h.kind && it.n == h.n && km(it.lat, it.lng, h.lat, h.lng) < 3.0 }) continue
+            kept.add(h)
+        }
+        for (h in kept) {
+            out.put(JSONObject().put("name", h.name).put("kind", h.kind).put("lat", h.lat).put("lng", h.lng)
+                .put("rank", h.rank).put("pack", h.pack).apply { h.km?.let { put("km", Math.round(it * 10) / 10.0) } })
+        }
+        return out
+    }
+
+    private fun serveJson(body: String): WebResourceResponse =
+        WebResourceResponse("application/json", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store", "Access-Control-Allow-Origin" to "*"),
+            ByteArrayInputStream(body.toByteArray(Charsets.UTF_8)))
 
     private fun sha256(file: File): String {
         val md = java.security.MessageDigest.getInstance("SHA-256")
